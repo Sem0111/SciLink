@@ -153,7 +153,8 @@ def prepare_md_slab(atoms: Atoms, beam_axis: str = "x",
                     roi: dict | None = None, trim_percentile: float = 3.0,
                     vacuum: float = 4.0, beam_direction=None,
                     fov_A: tuple | None = None,
-                    beam_thickness_A: float | None = None) -> Atoms:
+                    beam_thickness_A: float | None = None,
+                    in_plane_vacuum_A: float = 0.0) -> Atoms:
     """Crop + reorient an MD snapshot so the beam travels along abTEM z.
 
     ``roi`` gives axis-keyed windows in the ORIGINAL simulation frame, e.g.
@@ -210,9 +211,13 @@ def prepare_md_slab(atoms: Atoms, beam_axis: str = "x",
         raise ValueError("ROI/trim removed every atom - check the roi axes "
                          "and windows against the input cell")
     q = q - q.min(axis=0)
+    # lateral vacuum frames finite objects (tips, particles) so the surface
+    # outline sits inside the field of view instead of touching the border
+    q[:, :2] += in_plane_vacuum_A
     slab = Atoms(symbols=list(sym), positions=q)
     lx, ly, lz = q.max(axis=0)
-    slab.set_cell([lx, ly, lz + vacuum])
+    slab.set_cell([lx + in_plane_vacuum_A, ly + in_plane_vacuum_A,
+                   lz + vacuum])
     slab.center(axis=2)
     return slab
 

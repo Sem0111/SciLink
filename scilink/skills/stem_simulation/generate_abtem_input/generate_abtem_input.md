@@ -67,6 +67,28 @@ a 120 A window around a boundary at z~123.
   experimental lamella; downstream comparison must be geometric
   (column positions, PTM/CoS signatures), never intensity-based.
 
+### APT tips and finite nanostructures (shape-first rule)
+
+When the structure is an APT tip / needle or any finite free-standing
+object (recognizable by a strongly anisotropic bounding box with tapering
+cross-section, or provenance metadata saying so): the default view must
+SHOW THE OBJECT'S SHAPE, not a bulk slab from its interior.
+
+- View side-on (beam perpendicular to the long axis), with the crop window
+  including the apex plus empty space beyond it.
+- Set `trim_percentile=0` - percentile trims would shave off the apex and
+  taper edges, i.e. exactly the shape being imaged.
+- Add `in_plane_vacuum_A` (~10 A) so the surface outline sits inside the
+  field of view rather than touching the border; vacuum appears naturally
+  around the taper in the image.
+- Use a thin `roi` window along the beam (~40-50 A) through the tip axis.
+- Size the window against GPU memory: fields much beyond ~100 x 100 A
+  trigger the OOM ladder; a shape/morphology image tolerates the ladder's
+  reduced settings, but state the rung in any caption.
+- Interior/bulk questions (defect maps, ordering statistics) still use a
+  separate interior slab from the shank - the two views answer different
+  questions; do both when the objective covers both.
+
 ### ideal branch geometry
 
 `build_ideal_slab(atoms, zone_axis=(1,1,0), min_fov_A=(30,30),

@@ -380,8 +380,18 @@ def _simulate_once(atoms, microscope, pot_sampling, scan_sampling,
         measurement = measurement.to_cpu()
     img = np.asarray(measurement.array)
 
-    np.save(workdir / f"{out_prefix}.npy", img)
-    _save_png(img.T, workdir / f"{out_prefix}.png")
+    np.save(workdir / f"{out_prefix}.npy", img)   # raw - blur is display-side
+    # Source-size blur for the quicklook PNG: from probe_size_pm (FWHM) when
+    # the microscope dict carries it, else a 0.35 A default.
+    if "source_size_A" in microscope:
+        blur_A = float(microscope["source_size_A"])
+    elif "probe_size_pm" in microscope:
+        blur_A = float(microscope["probe_size_pm"]) / 100.0 / 2.355
+    else:
+        blur_A = 0.35
+    from scipy.ndimage import gaussian_filter
+    _save_png(gaussian_filter(img.T.astype(float), blur_A / scan_sampling),
+              workdir / f"{out_prefix}.png")
     extent = [float(v) for v in potential.extent]
     meta = {
         "microscope": dict(microscope),
@@ -393,6 +403,8 @@ def _simulate_once(atoms, microscope, pot_sampling, scan_sampling,
         "pot_sampling_A": pot_sampling,
         "prism_interpolation": interp,
         "oom_ladder_attempt": attempt,
+        "png_source_blur_A": blur_A,
+        "npy_is_raw": True,
         "n_atoms": len(atoms),
         "note": ("PRISM interpolation 6 trades accuracy for memory: coarser "
                  "plane-wave sampling can subtly smooth fine HAADF contrast"

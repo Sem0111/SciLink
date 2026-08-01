@@ -138,38 +138,74 @@ def read_structure(structure_path: str, type_map: dict | None = None,
 _BEAM_PERMUTATION = {"x": (1, 2, 0), "y": (2, 0, 1), "z": (0, 1, 2)}
 
 
+def _rotation_to_z(direction) -> np.ndarray:
+    """Rotation matrix taking ``direction`` (original frame) onto +z."""
+    n = np.asarray(direction, float)
+    n = n / np.linalg.norm(n)
+    ref = np.array([0.0, 0.0, 1.0]) if abs(n[2]) < 0.9 else np.array([1.0, 0.0, 0.0])
+    u = np.cross(ref, n)
+    u /= np.linalg.norm(u)
+    v = np.cross(n, u)
+    return np.vstack([u, v, n])  # rows = new basis in original coords
+
+
 def prepare_md_slab(atoms: Atoms, beam_axis: str = "x",
                     roi: dict | None = None, trim_percentile: float = 3.0,
-                    vacuum: float = 4.0) -> Atoms:
+                    vacuum: float = 4.0, beam_direction=None,
+                    fov_A: tuple | None = None,
+                    beam_thickness_A: float | None = None) -> Atoms:
     """Crop + reorient an MD snapshot so the beam travels along abTEM z.
 
     ``roi`` gives axis-keyed windows in the ORIGINAL simulation frame, e.g.
-    ``{"z": (63.0, 183.0)}``. The (right-handed) permutation then maps
-    ``beam_axis`` onto z. Ragged edges of tilted (triclinic) cells are
-    trimmed on the two in-plane axes by ``trim_percentile``; the beam
-    direction is padded with ``vacuum`` A. The interior-orthogonal-crop
-    approach sidesteps shear-correcting heavily tilted cells; keep analysis
-    regions > probe radius away from the cropped faces.
+    ``{"z": (63.0, 183.0)}``. Two orientation modes:
+
+    - ``beam_axis`` ("x"/"y"/"z"): right-handed permutation maps that axis
+      onto z (exact, no interpolation) - the default.
+    - ``beam_direction`` (any 3-vector in the original frame, e.g.
+      ``(1, 1, 1)`` for a BCC [111] view of a cube-aligned crystal):
+      positions are rotated so the vector lands on z. In this mode the
+      final windows are set in the ROTATED frame: ``fov_A`` crops central
+      lateral windows and ``beam_thickness_A`` a central window along the
+      beam (both recommended - a rotated chunk has no natural box).
+
+    Ragged edges of tilted (triclinic) cells are trimmed on in-plane axes
+    by ``trim_percentile`` (skipped for axes already windowed by roi/fov);
+    the beam direction is padded with ``vacuum`` A. The interior
+    orthogonal-crop approach sidesteps shear-correcting tilted cells; keep
+    analysis regions > probe radius away from the cropped faces.
     """
-    if beam_axis not in _BEAM_PERMUTATION:
-        raise ValueError(f"beam_axis must be x, y or z, got {beam_axis!r}")
     p = atoms.get_positions()
     sym = np.asarray(atoms.get_chemical_symbols())
     mask = np.ones(len(p), bool)
     for ax, (lo, hi) in (roi or {}).items():
         i = "xyz".index(ax)
         mask &= (p[:, i] > lo) & (p[:, i] < hi)
-    order = _BEAM_PERMUTATION[beam_axis]
-    q = p[mask][:, order]
-    sym = sym[mask]
-    roi_axes = {"xyz".index(ax) for ax in (roi or {})}
-    for k in (0, 1):
-        if order[k] in roi_axes:
-            continue  # window already chosen deliberately - don't re-crop it
-        lo, hi = np.percentile(q[:, k],
-                               [trim_percentile, 100 - trim_percentile])
-        keep = (q[:, k] > lo) & (q[:, k] < hi)
+    if beam_direction is not None:
+        q = p[mask] @ _rotation_to_z(beam_direction).T
+        sym = sym[mask]
+        skip_trim = set()
+    else:
+        if beam_axis not in _BEAM_PERMUTATION:
+            raise ValueError(f"beam_axis must be x, y or z, got {beam_axis!r}")
+        order = _BEAM_PERMUTATION[beam_axis]
+        q = p[mask][:, order]
+        sym = sym[mask]
+        skip_trim = {k for k in (0, 1)
+                     if order[k] in {"xyz".index(ax) for ax in (roi or {})}}
+    if beam_thickness_A is not None:
+        mid = 0.5 * (q[:, 2].min() + q[:, 2].max())
+        keep = np.abs(q[:, 2] - mid) < beam_thickness_A / 2.0
         q, sym = q[keep], sym[keep]
+    for k in (0, 1):
+        if fov_A is not None:
+            mid = 0.5 * (q[:, k].min() + q[:, k].max())
+            keep = np.abs(q[:, k] - mid) < fov_A[k] / 2.0
+            q, sym = q[keep], sym[keep]
+        elif k not in skip_trim:
+            lo, hi = np.percentile(q[:, k],
+                                   [trim_percentile, 100 - trim_percentile])
+            keep = (q[:, k] > lo) & (q[:, k] < hi)
+            q, sym = q[keep], sym[keep]
     if len(q) == 0:
         raise ValueError("ROI/trim removed every atom - check the roi axes "
                          "and windows against the input cell")

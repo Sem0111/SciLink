@@ -204,7 +204,16 @@ class PointCloudAnalysisAgent:
                 f"PHASE 2 - PLAN AND EXECUTE.\nScout evidence:\n"
                 f"{json.dumps(scout, indent=1)}\n\n"
                 "First, in comments at the top of your script, state your "
-                "DECISIONS with justification from the evidence: beam "
+                "DECISIONS with justification from the evidence: "
+                "WHETHER TO SIMULATE at all - render the image only if one "
+                "of these triggers applies and name it: (1) the objective "
+                "demands the image, (2) comparison against an experimental "
+                "image, (3) generating training data, (4) testing defect "
+                "visibility under the imaging conditions, (5) the "
+                "image-vs-structure verification cross-check is wanted. If "
+                "none applies, SKIP the simulation and answer from the 3D "
+                "structure tools alone (seconds instead of GPU-minutes); "
+                "then beam "
                 "orientation (which axis gives the zone axis the objective "
                 "asks for, and keeps the feature edge-on), ROI (feature-"
                 "centered window vs apex-inclusive vs no crop - respect the "
@@ -222,6 +231,10 @@ class PointCloudAnalysisAgent:
 
         gate = self._gate(result)
 
+        decisions = "\n".join(
+            l for l in (self.workdir / "commit_1.py").read_text().splitlines()
+            if l.startswith("#"))[:6000] if (self.workdir / "commit_1.py").exists() else ""
+
         answer = self._llm("interpret", [{"role": "user", "content":
             common + (
                 f"PHASE 3 - INTERPRET.\nExecution results:\n"
@@ -233,6 +246,16 @@ class PointCloudAnalysisAgent:
                 "or quality rung imply). If the gate failed, say what is and "
                 "is not trustworthy. Markdown, concise.")}])
         (self.workdir / "final_answer.md").write_text(answer)
+        from .report import build_html_report
+        images = {}
+        files = result.get("files") or {}
+        if files.get("png"):
+            images["Simulated HAADF-STEM"] = files["png"]
+        for extra in self.workdir.glob("*_defects3d.png"):
+            images["3D defect projections"] = extra.name
+        report = build_html_report(
+            str(self.workdir), objective, metadata, scout, result, gate,
+            answer, decisions_text=decisions, images=images)
         return {"status": "success" if gate.get("passed") else "gate_failed",
                 "scout": scout, "result": result, "gate": gate,
-                "answer": answer}
+                "answer": answer, "report_html": report}

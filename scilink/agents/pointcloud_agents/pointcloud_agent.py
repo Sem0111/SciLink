@@ -90,7 +90,7 @@ class PointCloudAnalysisAgent:
         import litellm
         t0 = time.time()
         resp = litellm.completion(model=self.model, messages=messages,
-                                  max_tokens=4000, temperature=0.2)
+                                  max_tokens=4000)
         text = resp.choices[0].message.content
         self.transcript.append({"phase": tag, "elapsed_s": round(time.time() - t0, 1),
                                 "prompt": messages, "response": text})

@@ -154,7 +154,9 @@ def visualize_communities(community_xyz: str, out_prefix: str,
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     for ax, (i, j, lab) in zip(axes, [(0, 2, "x-z"), (1, 2, "y-z"),
                                       (0, 1, "x-y")]):
-        for c in sorted(set(com.tolist())):
+        # draw large communities first so small ones stay visible on top
+        order = sorted(set(com.tolist()), key=lambda c: -(com == c).sum())
+        for c in order:
             m = com == c
             ax.scatter(p[m, i], p[m, j], s=3, lw=0,
                        c=colors[c % len(colors)], label=f"community {c}")

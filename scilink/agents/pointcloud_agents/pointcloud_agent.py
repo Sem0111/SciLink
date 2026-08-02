@@ -61,6 +61,11 @@ def _render_specs():
         specs = specs + ptm3d_tools.TOOL_SPECS
     except ImportError:
         pass
+    try:
+        from scilink.skills.point_cloud_analysis.apt_ccd import apt_tools
+        specs = specs + apt_tools.TOOL_SPECS
+    except ImportError:
+        pass
     out = []
     for spec in specs:
         out.append(f"### {spec.name}\n{spec.description}\n"
@@ -140,6 +145,17 @@ class PointCloudAnalysisAgent:
     # ---------------- gate ----------------
     def _gate(self, result):
         checks = {}
+        files = result.get("files") or {}
+        if "npy" not in files:
+            # simulation was (legitimately) skipped - verify whatever
+            # artifacts the plan promised actually exist
+            checks["simulation_skipped"] = True
+            for k, v in files.items():
+                checks[f"file_{k}_exists"] = bool((self.workdir / str(v)).exists())
+            checks["passed"] = all(v is True for k, v in checks.items()
+                                   if isinstance(v, bool))
+            (self.workdir / "gate.json").write_text(json.dumps(checks, indent=1))
+            return checks
         try:
             npy = self.workdir / result["files"]["npy"]
             meta = json.loads((self.workdir / result["files"]["meta"]).read_text())
@@ -222,11 +238,11 @@ class PointCloudAnalysisAgent:
                 "HAADF image under the metadata conditions, and run "
                 "structure_defect_map on the same slab. End by printing one "
                 "line:\n"
-                "RESULT_JSON: {\"beam_axis\":..., \"roi\":..., "
-                "\"out_prefix\":..., \"files\": {\"npy\":..., \"png\":..., "
-                "\"meta\":...}, \"n_columns_structure\":..., "
-                "\"ptm_fractions\":..., \"hcp_positions_A\": [y positions of "
-                "HCP columns, for layer counting]}"),
+                "RESULT_JSON: {\"decisions\": {...}, \"files\": {label: filename "
+                "for every artifact you produced - include npy/png/meta keys "
+                "when you simulated an image}, plus whatever quantitative "
+                "result fields your analyses yielded (e.g. "
+                "n_columns_structure, ptm_fractions, community compositions)}"),
             "RESULT_JSON:", self.commit_timeout)
 
         gate = self._gate(result)

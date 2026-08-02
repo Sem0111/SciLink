@@ -235,17 +235,45 @@ class PointCloudAnalysisAgent:
             l for l in (self.workdir / "commit_1.py").read_text().splitlines()
             if l.startswith("#"))[:6000] if (self.workdir / "commit_1.py").exists() else ""
 
-        answer = self._llm("interpret", [{"role": "user", "content":
+        raw = self._llm("interpret", [{"role": "user", "content":
             common + (
-                f"PHASE 3 - INTERPRET.\nExecution results:\n"
+                f"PHASE 3 - INTERPRET.\nScout evidence:\n"
+                f"{json.dumps(scout, indent=1)}\n\nExecution results:\n"
                 f"{json.dumps(result, indent=1)}\n\nVerification gate:\n"
                 f"{json.dumps(gate, indent=1)}\n\n"
-                "Answer the scientific objective directly and quantitatively "
-                "(boundary location, boundary character via the HCP layer-"
-                "count rule, additional defects, with the caveats the gate "
-                "or quality rung imply). If the gate failed, say what is and "
-                "is not trustworthy. Markdown, concise.")}])
+                "Produce the scientific interpretation as a single fenced "
+                "```json block with exactly these fields:\n"
+                '{"detailed_analysis": "3-6 plain-prose paragraphs (no '
+                "markdown syntax) interpreting the data and analysis: what "
+                "was measured/computed, what the numbers show, and the "
+                "direct quantitative answer to the objective\", "
+                '"scientific_claims": [2-4 items, each '
+                '{"claim": one-sentence finding, '
+                '"scientific_impact": why it matters, '
+                '"has_anyone_question": a literature-search question phrased '
+                "'Has anyone ...?', "
+                '"keywords": [3-6 terms]}], '
+                '"caveats": "short plain-prose statement of limitations '
+                '(gate results, quality rung, single-snapshot thermal '
+                'statistics, foil thickness)"}')}])
+        m = re.findall(r"```json\n(.*?)```", raw, re.S)
+        try:
+            interpretation = json.loads(m[-1]) if m else json.loads(raw)
+        except Exception:
+            interpretation = {"detailed_analysis": raw,
+                              "scientific_claims": [], "caveats": ""}
+        md = [interpretation.get("detailed_analysis", "")]
+        for i, c in enumerate(interpretation.get("scientific_claims", []), 1):
+            md.append(f"\n**Claim {i}:** {c.get('claim', '')}\n"
+                      f"- Impact: {c.get('scientific_impact', '')}\n"
+                      f"- Literature: {c.get('has_anyone_question', '')}\n"
+                      f"- Keywords: {', '.join(c.get('keywords', []))}")
+        if interpretation.get("caveats"):
+            md.append(f"\n**Caveats:** {interpretation['caveats']}")
+        answer = "\n".join(md)
         (self.workdir / "final_answer.md").write_text(answer)
+        (self.workdir / "interpretation.json").write_text(
+            json.dumps(interpretation, indent=1))
         from .report import build_html_report
         images = {}
         files = result.get("files") or {}
@@ -255,7 +283,8 @@ class PointCloudAnalysisAgent:
             images["3D defect projections"] = extra.name
         report = build_html_report(
             str(self.workdir), objective, metadata, scout, result, gate,
-            answer, decisions_text=decisions, images=images)
+            interpretation, decisions_text=decisions, images=images)
         return {"status": "success" if gate.get("passed") else "gate_failed",
                 "scout": scout, "result": result, "gate": gate,
-                "answer": answer, "report_html": report}
+                "answer": answer, "interpretation": interpretation,
+                "report_html": report}

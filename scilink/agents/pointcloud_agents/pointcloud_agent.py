@@ -54,8 +54,15 @@ species from the metadata.
 def _render_specs():
     from scilink.skills.stem_simulation.haadf_workflow import abtem_tools
     from scilink.skills.stem_simulation.haadf_workflow import scout_tools
+    specs = scout_tools.TOOL_SPECS + abtem_tools.TOOL_SPECS
+    try:
+        from scilink.skills.point_cloud_analysis.structure_id_3d import (
+            ptm3d_tools)
+        specs = specs + ptm3d_tools.TOOL_SPECS
+    except ImportError:
+        pass
     out = []
-    for spec in scout_tools.TOOL_SPECS + abtem_tools.TOOL_SPECS:
+    for spec in specs:
         out.append(f"### {spec.name}\n{spec.description}\n"
                    f"import: {spec.import_line}\n"
                    f"signature: {spec.signature}\n"

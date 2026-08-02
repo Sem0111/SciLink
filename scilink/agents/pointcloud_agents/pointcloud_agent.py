@@ -142,6 +142,29 @@ class PointCloudAnalysisAgent:
                     "Fix the problem and return the complete corrected script."}]
         raise RuntimeError(f"phase {tag} failed after retry")
 
+    def _parse_interpretation(self, raw):
+        def _attempt(text):
+            m = re.findall(r"```json\n(.*?)```", text, re.S)
+            obj = json.loads(m[-1] if m else text)
+            da = obj.get("detailed_analysis", "")
+            if isinstance(da, (list, tuple)):
+                obj["detailed_analysis"] = "\n\n".join(str(x) for x in da)
+            return obj
+        try:
+            return _attempt(raw)
+        except Exception:
+            pass
+        try:  # one-shot LLM repair of malformed JSON
+            fixed = self._llm("interpret_jsonfix", [{"role": "user", "content":
+                "Convert the following into VALID json inside a single "
+                "```json fenced block, with detailed_analysis as one single "
+                "string, scientific_claims as a list of objects, caveats as "
+                "a string. Preserve all content verbatim.\n\n" + raw}])
+            return _attempt(fixed)
+        except Exception:
+            return {"detailed_analysis": raw, "scientific_claims": [],
+                    "caveats": ""}
+
     # ---------------- gate ----------------
     def _gate(self, result):
         checks = {}
@@ -259,7 +282,7 @@ class PointCloudAnalysisAgent:
                 f"{json.dumps(gate, indent=1)}\n\n"
                 "Produce the scientific interpretation as a single fenced "
                 "```json block with exactly these fields:\n"
-                '{"detailed_analysis": "3-6 plain-prose paragraphs (no '
+                '{"detailed_analysis": "ONE SINGLE STRING (not a list) of 3-6 plain-prose paragraphs (no '
                 "markdown syntax) interpreting the data and analysis: what "
                 "was measured/computed, what the numbers show, and the "
                 "direct quantitative answer to the objective\", "
@@ -272,12 +295,7 @@ class PointCloudAnalysisAgent:
                 '"caveats": "short plain-prose statement of limitations '
                 '(gate results, quality rung, single-snapshot thermal '
                 'statistics, foil thickness)"}')}])
-        m = re.findall(r"```json\n(.*?)```", raw, re.S)
-        try:
-            interpretation = json.loads(m[-1]) if m else json.loads(raw)
-        except Exception:
-            interpretation = {"detailed_analysis": raw,
-                              "scientific_claims": [], "caveats": ""}
+        interpretation = self._parse_interpretation(raw)
         md = [interpretation.get("detailed_analysis", "")]
         for i, c in enumerate(interpretation.get("scientific_claims", []), 1):
             md.append(f"\n**Claim {i}:** {c.get('claim', '')}\n"
@@ -295,8 +313,11 @@ class PointCloudAnalysisAgent:
         files = result.get("files") or {}
         if files.get("png"):
             images["Simulated HAADF-STEM"] = files["png"]
-        for extra in self.workdir.glob("*_defects3d.png"):
-            images["3D defect projections"] = extra.name
+        # sweep every png any phase produced anywhere under the workdir
+        for extra in sorted(self.workdir.rglob("*.png"))[:8]:
+            label = extra.stem.replace("_", " ")
+            if str(extra.name) != str(files.get("png", "")):
+                images.setdefault(label, str(extra))
         report = build_html_report(
             str(self.workdir), objective, metadata, scout, result, gate,
             interpretation, decisions_text=decisions, images=images)

@@ -126,7 +126,45 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
     res = _jsonable(res)
     stem = Path(neighborhood_csv).stem
     res["community_xyz"] = str(Path(savedir) / f"{stem}_community_clustering.xyz")
+    try:
+        res["community_map_png"] = visualize_communities(
+            res["community_xyz"], out_prefix=stem, workdir=savedir)["png"]
+    except Exception as exc:  # noqa: BLE001 - viz is best-effort
+        res["community_map_png"] = None
+        res["viz_error"] = str(exc)
+    ks = Path(savedir) / "KS_stats.png"
+    if ks.exists():
+        res["ks_plot_png"] = str(ks)
     return res
+
+
+def visualize_communities(community_xyz: str, out_prefix: str,
+                          workdir: str = "ccd_analysis") -> dict:
+    """Render the community-labelled point cloud: three-view projections of
+    neighborhood centers colored by community - the segregation map."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    rows = np.loadtxt(community_xyz, skiprows=2)
+    com = rows[:, 0].astype(int)
+    p = rows[:, 1:4]
+    colors = ["#4053d3", "#b51d14", "#ddb310", "#00b25d", "#7f2ccb",
+              "#fb49b0", "#00beff"]
+    fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for ax, (i, j, lab) in zip(axes, [(0, 2, "x-z"), (1, 2, "y-z"),
+                                      (0, 1, "x-y")]):
+        for c in sorted(set(com.tolist())):
+            m = com == c
+            ax.scatter(p[m, i], p[m, j], s=3, lw=0,
+                       c=colors[c % len(colors)], label=f"community {c}")
+        ax.set_aspect(1)
+        ax.set_title(f"communities - {lab} [nm]")
+    axes[0].legend(markerscale=4, fontsize=8)
+    out = Path(workdir) / f"{out_prefix}_community_map.png"
+    fig.savefig(out, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+    return {"png": str(out), "n_communities": int(len(set(com.tolist())))}
 
 
 _IMP = "from scilink.skills.point_cloud_analysis.apt_ccd.apt_tools import "

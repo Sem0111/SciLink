@@ -1,0 +1,54 @@
+---
+description: "Compositional Community Detection (CCD) for APT and simulated point clouds: overlapping spherical composition neighborhoods, KMeans-ensemble + Louvain community detection, per-community enrichment/depletion signatures (signed KS statistics) - identifies chemical segregation, clustering and short-range-order domains. Works on real reconstructions (.pos/.apt + .rrng) and on simulated structures via a synthetic-mass adapter."
+detect:
+  binaries: []
+  env_vars: []
+  python_modules: [sklearn, community, networkx, seaborn, heapdict]
+  guidance: |
+    Vendored implementation (with permission) of Bilbrey et al., Microscopy
+    and Microanalysis 31 (2025), maintained by Jenna Pope
+    (jenna.pope@pnnl.gov) - CITE when used. python-louvain provides the
+    'community' module; apav is needed only for real .pos/.apt inputs.
+---
+
+## overview
+
+CCD finds compositionally distinct regions without pre-specifying what to
+look for: overlapping spherical neighborhoods (default 1 nm radius, 50%
+overlap) -> per-neighborhood composition vectors -> an ensemble of KMeans
+clusterings (k = 4,5,6 x seeds) -> Louvain communities on the co-clustering
+graph -> stable communities with per-ion signed KS statistics (+ enriched,
+- depleted vs bulk).
+
+Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
+(simulated data, ideal-detection assumption), `detect_segregation`.
+
+## planning
+
+- Neighborhood radius sets the length scale probed: 1 nm resolves nm-scale
+  segregation/clustering; sub-nm short-range order is SMOOTHED at 1 nm and
+  appears as reduced-amplitude composition modulations - decreasing the
+  radius (0.5-0.75 nm) sharpens it at the cost of counting statistics
+  (aim for >100 ions/neighborhood).
+- Interpret communities with BOTH signals: signed KS statistics (statistical
+  strength) and mean composition differences (physical amplitude). Strong
+  KS with small percentage-point amplitude = dispersed short-range order /
+  incipient clustering; strong KS with large amplitude = discrete phases or
+  precipitates.
+- Always check the SPATIAL distribution of communities (community_xyz):
+  localized communities = surface/apex/boundary segregation or precipitates;
+  interpenetrating uniform communities = bulk SRO/spinodal-like partitioning.
+- Ignore-ions: exclude contaminants (O, H species) on real data.
+- Simulated route caveat: ideal detection (100% efficiency, no trajectory
+  aberrations). Real APT (~40-80% efficiency) blurs amplitudes further -
+  simulated results are upper bounds on detectability, which is exactly the
+  sim2exp question the skill can answer by degrading the simulated cloud.
+
+## validation
+
+- Mean neighborhood density should match the material (~60/nm^3 for BCC
+  refractory metals at full detection).
+- Communities should be stable across the KMeans ensemble (that is what the
+  Louvain co-clustering graph enforces); a single-k single-seed structure
+  is not a finding.
+- Report bulk composition alongside per-community compositions.

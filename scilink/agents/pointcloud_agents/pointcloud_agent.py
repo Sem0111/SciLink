@@ -1,148 +1,188 @@
-"""PointCloudAnalysisAgent (MVP).
+"""PointCloudAnalysisAgent - the 3D point-cloud modality agent.
 
-A minimal modality agent for 3D point clouds (simulated structures now; APT
-reconstructions later). Loop: load -> SCOUT (cheap CPU evidence: shape, zone
-axes, feature localization) -> PLAN+COMMIT (LLM decides orientation and ROI
-from the scout evidence, then renders/analyzes via the stem_simulation
-TOOL_SPEC functions) -> GATE (deterministic execution checks incl. an
-image-vs-structure column-count cross-check) -> INTERPRET (LLM answers the
-scientific objective from the verified results).
+Analyzes atomistic point clouds: simulated structures (xyz/extxyz, LAMMPS
+data, CIF) and APT reconstructions (pos/epos/apt, ranged xyz/csv). Loop:
 
-The ROI decision is the central planning gate: apex-inclusive for finite
-tips, feature-centered when the objective targets a defect/boundary, no crop
-when the data and memory budget allow it.
+  SCOUT       cheap CPU evidence: cloud kind, shape, zone axes, features
+  PLAN+COMMIT LLM decides ROI / orientation / whether to forward-simulate,
+              then executes via the point_cloud_analysis + stem_simulation
+              skill tools (codegen, sandboxed subprocess)
+  GATE        deterministic physics checks (image-vs-structure column count,
+              artifact existence) - no LLM scoring; this modality has ground
+              truth and uses it
+  INTERPRET   structured scientific interpretation (detailed_analysis,
+              scientific_claims with literature hooks, caveats) + HTML report
+
+Orchestrator-compatible per the BaseAnalysisAgent contract: constructor
+accepts api_key/model_name/base_url/output_dir/enable_human_feedback;
+analyze() takes (data, system_info=None, objective=None, hints=None, ...)
+and returns status / detailed_analysis / scientific_claims /
+output_directory.
 """
 
 from __future__ import annotations
 
 import json
 import re
-import subprocess
-import sys
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any, Dict
 
 import numpy as np
+
+from ...executors import ScriptExecutor, require_sandbox_approval
+from ...skills._shared._registry import format_tool_inventory
+from ..exp_agents.base_agent import BaseAnalysisAgent
+from .report import build_html_report
+
+# Skill bundles whose TOOL_SPECS this agent serves (registry-gated by name).
+DEFAULT_ACTIVE_SKILLS = ["haadf_workflow", "generate_abtem_input",
+                         "structure_id_3d", "apt_ccd"]
 
 _BUDGET_NOTES = """\
 GPU memory budget (24 GB class card, empirical): a lateral field up to
 ~9500 A^2 simulates at full quality (0.04 A sampling, PRISM interpolation 4);
 up to ~11000 A^2 completes with degraded settings via the automatic OOM
-ladder (0.05 A, interpolation 6, reduced detector ceiling); larger fields
-exhaust the ladder and FAIL - crop, or state that tiling would be required.
-On a 16 GB card, subtract ~30%. Prefer full-quality fields for quantitative
-objectives; degraded rungs are acceptable for morphology-only objectives.
+ladder; larger fields exhaust the ladder and FAIL - crop, or state that
+tiling would be required. On a 16 GB card, subtract ~30%. On CPU (no cupy)
+simulation runs but is minutes-to-hours slower - prefer skipping simulation
+unless the objective demands the image.
 """
 
 _PHYSICS_NOTES = """\
+Cloud kinds (use classify_cloud_kind evidence): a simulated/ideal lattice
+supports lattice-resolved tools (PTM, HAADF simulation); an APT
+reconstruction (detection efficiency ~40-80%, trajectory aberrations)
+supports statistical tools (CCD, composition, Warren-Cowley) - run
+lattice-resolved analysis on APT data only where the scout shows resolvable
+order. Numeric species = unranged APT: ranging (.rrng) is required first.
+
 Zone-axis identification from the projected net (FCC, 3D NN distance = a/sqrt2):
-  <110> view: NN_proj ~ 0.61a (centered rectangular, 4+2 shell)
-  <111> view: NN_proj ~ 0.41a (hexagonal)
-  <100> view: NN_proj ~ 0.71a (square)
+  <110> view: NN_proj ~ 0.61a; <111>: ~0.41a (hexagonal); <100>: ~0.71a (square).
 A planar boundary is only VISIBLE (edge-on) when the beam is PERPENDICULAR
-to its normal; a projection along the normal renders it face-on/invisible.
-Defect interpretation from per-column 2D-PTM in an FCC matrix:
-  1 HCP layer between mirrored FCC domains = coherent twin boundary (sigma-3);
-  2 adjacent HCP layers = intrinsic stacking fault; 2 HCP layers sandwiching
-  1 FCC layer = extrinsic fault. Isolated HCP segments/patches or elevated
-  unidentified fractions away from the main feature = additional defects.
-LAMMPS files with anonymous types need type_map (e.g. {1: 'Fe'}) - take the
-species from the metadata.
+to its normal. Defect reading from per-column 2D-PTM in an FCC matrix:
+1 HCP layer between mirrored FCC = coherent twin (sigma-3); 2 adjacent HCP
+layers = intrinsic stacking fault; HCP-FCC-HCP = extrinsic fault.
+LAMMPS files with anonymous types need type_map from the metadata species.
+
+WHETHER TO SIMULATE an image - only if a trigger applies and you name it:
+(1) the objective demands the image, (2) comparison against an experimental
+image, (3) generating training data, (4) testing defect visibility under
+the imaging conditions, (5) the image-vs-structure verification cross-check
+is wanted. Otherwise SKIP simulation and answer from structure-side tools.
 """
 
-
-def _render_specs():
-    from scilink.skills.stem_simulation.haadf_workflow import abtem_tools
-    from scilink.skills.stem_simulation.haadf_workflow import scout_tools
-    specs = scout_tools.TOOL_SPECS + abtem_tools.TOOL_SPECS
-    try:
-        from scilink.skills.point_cloud_analysis.structure_id_3d import (
-            ptm3d_tools)
-        specs = specs + ptm3d_tools.TOOL_SPECS
-    except ImportError:
-        pass
-    try:
-        from scilink.skills.point_cloud_analysis.apt_ccd import apt_tools
-        specs = specs + apt_tools.TOOL_SPECS
-    except ImportError:
-        pass
-    out = []
-    for spec in specs:
-        out.append(f"### {spec.name}\n{spec.description}\n"
-                   f"import: {spec.import_line}\n"
-                   f"signature: {spec.signature}\n"
-                   f"when: {spec.when_to_use}\nreturns: {spec.returns}\n"
-                   f"example:\n{spec.example}\n")
-    return "\n".join(out)
+_INTERPRET_SCHEMA = (
+    'Produce the scientific interpretation as a single fenced ```json block '
+    'with exactly these fields:\n'
+    '{"detailed_analysis": "ONE SINGLE STRING (not a list) of 3-6 plain-prose '
+    'paragraphs (separated by \\n\\n, no markdown) interpreting the data and '
+    'analysis and answering the objective quantitatively", '
+    '"scientific_claims": [2-4 items, each {"claim": one-sentence finding, '
+    '"scientific_impact": why it matters, "has_anyone_question": a literature '
+    "question phrased 'Has anyone ...?', \"keywords\": [3-6 terms]}], "
+    '"caveats": "short plain-prose statement of limitations"}')
 
 
-class PointCloudAnalysisAgent:
-    """Minimal point-cloud modality agent driving the stem_simulation skills."""
+class PointCloudAnalysisAgent(BaseAnalysisAgent):
+    """Agent for 3D atomistic point clouds (simulated and APT)."""
 
-    def __init__(self, model_name: str, workdir: str,
-                 python_exe: str = sys.executable,
-                 scout_timeout: int = 900, commit_timeout: int = 3600):
-        self.model = model_name
-        self.workdir = Path(workdir)
-        self.workdir.mkdir(parents=True, exist_ok=True)
-        self.py = python_exe
-        self.scout_timeout = scout_timeout
+    AGENT_NAME = "PointCloudAnalysis"
+    AGENT_DESCRIPTION = (
+        "3D atomistic point clouds: simulated structures (xyz/extxyz, LAMMPS "
+        "data, CIF) and APT reconstructions (pos/epos/apt, ranged xyz/csv). "
+        "Scouts cloud kind/shape/lattice/features, decides region of "
+        "interest and whether to forward-simulate a HAADF image, then runs "
+        "structural classification (3D PTM, DXA), compositional segregation "
+        "(CCD), or synthesized analyses (e.g. Warren-Cowley), with "
+        "deterministic physics verification.")
+    AGENT_SHORT_NAME = "pointcloud"
+
+    def __init__(self,
+                 api_key: str | None = None,
+                 model_name: str = "claude-opus-4-6",
+                 base_url: str | None = None,
+                 output_dir: str = "pointcloud_analysis_output",
+                 enable_human_feedback: bool = False,
+                 executor_timeout: int = 900,
+                 commit_timeout: int = 3600,
+                 **kwargs):
+        if not require_sandbox_approval(
+                context="PointCloudAnalysisAgent executes generated analysis scripts"):
+            raise RuntimeError("Sandbox approval declined - aborting")
+        super().__init__(api_key=api_key, model_name=model_name,
+                         base_url=base_url, output_dir=output_dir,
+                         enable_human_feedback=enable_human_feedback, **kwargs)
+        self.agent_type = "pointcloud_analysis"
+        self.executor = ScriptExecutor(timeout=executor_timeout)
         self.commit_timeout = commit_timeout
-        self.transcript = []
+        self.transcript: list = []
 
-    # ---------------- LLM plumbing ----------------
-    def _llm(self, tag, messages):
-        import litellm
+    # ------------------------------------------------------------------
+    # required-by-convention base hooks
+    # ------------------------------------------------------------------
+    def _get_claims_instruction_prompt(self) -> str:
+        return _INTERPRET_SCHEMA
+
+    def _get_measurement_recommendations_prompt(self) -> str:
+        return ("Based on the point-cloud analysis results, recommend "
+                "follow-up measurements (imaging conditions, APT run "
+                "parameters, or simulations) as structured JSON.")
+
+    # ------------------------------------------------------------------
+    # LLM + execution plumbing
+    # ------------------------------------------------------------------
+    def _llm(self, tag: str, prompt: str, workdir: Path) -> str:
         t0 = time.time()
-        resp = litellm.completion(model=self.model, messages=messages,
-                                  max_tokens=4000)
-        text = resp.choices[0].message.content
-        self.transcript.append({"phase": tag, "elapsed_s": round(time.time() - t0, 1),
-                                "prompt": messages, "response": text})
-        (self.workdir / "transcript.json").write_text(
+        response = self.model.generate_content(prompt)
+        text = response.text if hasattr(response, "text") else str(response)
+        self.transcript.append({"phase": tag,
+                                "elapsed_s": round(time.time() - t0, 1),
+                                "prompt": prompt[-4000:], "response": text})
+        (workdir / "transcript.json").write_text(
             json.dumps(self.transcript, indent=1, default=str))
         return text
 
     @staticmethod
-    def _extract_code(text):
+    def _extract_code(text: str) -> str:
         m = re.findall(r"```python\n(.*?)```", text, re.S)
         if not m:
             raise ValueError("LLM response contained no python code block")
         return m[-1]
 
-    def _run_script(self, name, code, timeout):
-        path = self.workdir / name
-        path.write_text(code)
-        proc = subprocess.run([self.py, str(path)], cwd=self.workdir,
-                              capture_output=True, text=True, timeout=timeout)
-        (self.workdir / f"{name}.out").write_text(
-            proc.stdout[-20000:] + "\n--- STDERR ---\n" + proc.stderr[-8000:])
-        return proc
+    def _run_phase(self, tag: str, prompt: str, marker: str, workdir: Path,
+                   timeout: int) -> dict:
+        """LLM -> script -> sandboxed subprocess; one regenerate on failure.
 
-    def _run_phase(self, tag, prompt, marker, timeout):
-        """LLM -> script -> execute; one regenerate on failure. Returns the
-        JSON payload printed on the marker line."""
-        messages = [{"role": "user", "content": prompt}]
+        Returns the JSON payload printed on the marker line."""
+        current = prompt
         for attempt in (1, 2):
-            code = self._extract_code(self._llm(f"{tag}_{attempt}", messages))
-            proc = self._run_script(f"{tag}_{attempt}.py", code, timeout)
+            code = self._extract_code(self._llm(f"{tag}_{attempt}", current,
+                                                workdir))
+            (workdir / f"{tag}_{attempt}.py").write_text(code)
+            res = self.executor.execute_script(code, working_dir=str(workdir),
+                                               timeout=timeout)
+            stdout = res.get("stdout", "")
+            (workdir / f"{tag}_{attempt}.out").write_text(
+                stdout[-20000:] + "\n--- STATUS ---\n"
+                + str(res.get("message", res.get("stderr", "")))[-6000:])
             payload = None
-            for line in reversed(proc.stdout.splitlines()):
+            for line in reversed(stdout.splitlines()):
                 if line.startswith(marker):
                     payload = json.loads(line[len(marker):])
                     break
-            if proc.returncode == 0 and payload is not None:
+            if res.get("status") == "success" and payload is not None:
                 return payload
-            messages += [
-                {"role": "assistant", "content": code},
-                {"role": "user", "content":
-                    f"The script failed (exit {proc.returncode}) or did not "
-                    f"print the required '{marker}' line.\nSTDOUT tail:\n"
-                    f"{proc.stdout[-2500:]}\nSTDERR tail:\n{proc.stderr[-2500:]}\n"
-                    "Fix the problem and return the complete corrected script."}]
+            err = res.get("message") or ("script ran but did not print "
+                                         + marker)
+            current = (prompt
+                       + f"\n\nYour previous script failed:\n```python\n{code}\n```\n"
+                       f"Error / output tail:\n{str(err)[-2000:]}\n{stdout[-2000:]}\n"
+                       "Fix the problem and return the complete corrected script.")
         raise RuntimeError(f"phase {tag} failed after retry")
 
-    def _parse_interpretation(self, raw):
+    def _parse_interpretation(self, raw: str, workdir: Path) -> dict:
         def _attempt(text):
             m = re.findall(r"```json\n(.*?)```", text, re.S)
             obj = json.loads(m[-1] if m else text)
@@ -154,174 +194,190 @@ class PointCloudAnalysisAgent:
             return _attempt(raw)
         except Exception:
             pass
-        try:  # one-shot LLM repair of malformed JSON
-            fixed = self._llm("interpret_jsonfix", [{"role": "user", "content":
-                "Convert the following into VALID json inside a single "
-                "```json fenced block, with detailed_analysis as one single "
-                "string, scientific_claims as a list of objects, caveats as "
-                "a string. Preserve all content verbatim.\n\n" + raw}])
+        try:
+            fixed = self._llm("interpret_jsonfix",
+                              "Convert the following into VALID json inside a "
+                              "single ```json fenced block, with "
+                              "detailed_analysis as one single string, "
+                              "scientific_claims a list of objects, caveats a "
+                              "string. Preserve content verbatim.\n\n" + raw,
+                              workdir)
             return _attempt(fixed)
         except Exception:
             return {"detailed_analysis": raw, "scientific_claims": [],
                     "caveats": ""}
 
-    # ---------------- gate ----------------
-    def _gate(self, result):
-        checks = {}
+    # ------------------------------------------------------------------
+    # deterministic gate
+    # ------------------------------------------------------------------
+    def _gate(self, result: dict, workdir: Path) -> dict:
+        checks: Dict[str, Any] = {}
         files = result.get("files") or {}
-        if "npy" not in files:
-            # simulation was (legitimately) skipped - verify whatever
-            # artifacts the plan promised actually exist
-            checks["simulation_skipped"] = True
-            for k, v in files.items():
-                checks[f"file_{k}_exists"] = bool((self.workdir / str(v)).exists())
-            checks["passed"] = all(v is True for k, v in checks.items()
-                                   if isinstance(v, bool))
-            (self.workdir / "gate.json").write_text(json.dumps(checks, indent=1))
-            return checks
         try:
-            npy = self.workdir / result["files"]["npy"]
-            meta = json.loads((self.workdir / result["files"]["meta"]).read_text())
-            img = np.load(npy)
-            checks["artifacts_exist"] = True
-            checks["image_finite_nonuniform"] = bool(
-                np.isfinite(img).all() and img.std() > 0)
-            det = meta.get("detector", {})
-            checks["annulus_within_antialias"] = bool(
-                det.get("outer_mrad_effective", 1e9)
-                <= det.get("antialias_limit_mrad", 0))
-            # image-vs-structure column-count cross-check
-            from scipy.ndimage import gaussian_filter, maximum_filter
-            im = gaussian_filter(img.T.astype(float),
-                                 0.35 / meta["scan_sampling_A"])
-            lo, hi = np.percentile(im, [1, 99.5])
-            imn = (im - lo) / (hi - lo)
-            size = max(3, int(round(1.4 / meta["scan_sampling_A"])))
-            peaks = (imn == maximum_filter(imn, size=size)) & (imn > 0.12)
-            n_img = int(peaks.sum())
-            n_struct = int(result.get("n_columns_structure", 0))
-            checks["n_columns_image"] = n_img
-            checks["n_columns_structure"] = n_struct
-            ratio = n_img / max(n_struct, 1)
-            checks["column_count_ratio"] = round(ratio, 2)
-            checks["column_count_consistent"] = bool(0.4 <= ratio <= 2.5)
+            if "npy" not in files:
+                checks["simulation_skipped"] = True
+                for k, v in files.items():
+                    checks[f"file_{k}_exists"] = bool(
+                        (workdir / str(v)).exists())
+            else:
+                meta = json.loads((workdir / files["meta"]).read_text())
+                img = np.load(workdir / files["npy"])
+                checks["artifacts_exist"] = True
+                checks["image_finite_nonuniform"] = bool(
+                    np.isfinite(img).all() and img.std() > 0)
+                det = meta.get("detector", {})
+                checks["annulus_within_antialias"] = bool(
+                    det.get("outer_mrad_effective", 1e9)
+                    <= det.get("antialias_limit_mrad", 0))
+                from scipy.ndimage import gaussian_filter, maximum_filter
+                im = gaussian_filter(img.T.astype(float),
+                                     0.35 / meta["scan_sampling_A"])
+                lo, hi = np.percentile(im, [1, 99.5])
+                imn = (im - lo) / (hi - lo)
+                size = max(3, int(round(1.4 / meta["scan_sampling_A"])))
+                peaks = ((imn == maximum_filter(imn, size=size))
+                         & (imn > 0.12))
+                n_img = int(peaks.sum())
+                n_struct = int(result.get("n_columns_structure", 0))
+                checks["n_columns_image"] = n_img
+                checks["n_columns_structure"] = n_struct
+                ratio = n_img / max(n_struct, 1)
+                checks["column_count_ratio"] = round(ratio, 2)
+                checks["column_count_consistent"] = bool(0.4 <= ratio <= 2.5)
         except Exception as exc:  # noqa: BLE001 - gate must always report
             checks["gate_error"] = f"{type(exc).__name__}: {exc}"
         checks["passed"] = all(v is True for k, v in checks.items()
                                if isinstance(v, bool))
-        (self.workdir / "gate.json").write_text(json.dumps(checks, indent=1))
+        (workdir / "gate.json").write_text(json.dumps(checks, indent=1))
         return checks
 
-    # ---------------- main ----------------
-    def analyze(self, structure_path: str, metadata_path: str,
-                objective: str) -> dict:
-        metadata = json.loads(Path(metadata_path).read_text())
-        specs = _render_specs()
+    # ------------------------------------------------------------------
+    # main entry
+    # ------------------------------------------------------------------
+    def analyze(self, data, system_info=None, objective: str | None = None,
+                hints: str | None = None, **kwargs) -> Dict[str, Any]:
+        path, paths, array, err = self._parse_data_input(data)
+        if array is not None:
+            return {"status": "error", "output_directory": str(self.output_dir),
+                    "error": {"error": "In-memory arrays are not supported - "
+                              "pass a structure file path (xyz/extxyz, LAMMPS "
+                              "data, CIF, pos/epos/apt, or x,y,z csv)"}}
+        if err or not path:
+            return {"status": "error", "output_directory": str(self.output_dir),
+                    "error": {"error": str(err) or "no input path"}}
+
+        metadata = self._handle_system_info(system_info)
+        objective = objective or ("Characterize this point cloud and report "
+                                  "noteworthy structural and chemical features.")
+        workdir = self.output_dir / (
+            f"analysis_{Path(path).stem}_"
+            f"{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        workdir.mkdir(parents=True, exist_ok=True)
+        self.transcript = []
+
+        inventory = format_tool_inventory(agent="pointcloud_analysis",
+                                          active_skills=DEFAULT_ACTIVE_SKILLS)
         common = (f"You are PointCloudAnalysisAgent, working on the atomistic "
-                  f"point cloud at {structure_path}.\n\nOBJECTIVE:\n{objective}\n\n"
-                  f"EXPERIMENT METADATA:\n{json.dumps(metadata, indent=1)}\n\n"
+                  f"point cloud at {path}.\n\nOBJECTIVE:\n{objective}\n\n"
+                  + (f"HINTS:\n{hints}\n\n" if hints else "")
+                  + f"METADATA:\n{json.dumps(metadata, indent=1)}\n\n"
                   f"AVAILABLE TOOLS (import and call exactly as documented):\n"
-                  f"{specs}\nPHYSICS NOTES:\n{_PHYSICS_NOTES}\n"
+                  f"{inventory}\nPHYSICS NOTES:\n{_PHYSICS_NOTES}\n"
                   f"BUDGET NOTES:\n{_BUDGET_NOTES}\n")
 
-        scout = self._run_phase(
-            "scout",
-            common + (
-                "PHASE 1 - SCOUT. Write ONE python script that gathers, on CPU "
-                "only (no simulation), the evidence needed to plan this task: "
-                "load the structure (read_structure), profile its shape, "
-                "evaluate candidate beam axes (net_quality on x, y, z), and "
-                "localize the feature the objective asks about "
-                "(feature_profile along suitable axes). "
-                "Print progress freely, and end by printing one line: "
-                "SCOUT_JSON: {json with your collected evidence}"),
-            "SCOUT_JSON:", self.scout_timeout)
+        try:
+            scout = self._run_phase(
+                "scout",
+                common + (
+                    "PHASE 1 - SCOUT. Write ONE python script gathering, on "
+                    "CPU only (no simulation), the evidence needed to plan: "
+                    "classify the cloud kind (classify_cloud_kind), load and "
+                    "profile the structure, evaluate candidate beam axes if "
+                    "lattice-resolved work may apply, and localize any "
+                    "feature the objective asks about. Print progress freely "
+                    "and end with one line:\nSCOUT_JSON: {json evidence}"),
+                "SCOUT_JSON:", workdir, timeout=900)
 
-        result = self._run_phase(
-            "commit",
-            common + (
-                f"PHASE 2 - PLAN AND EXECUTE.\nScout evidence:\n"
-                f"{json.dumps(scout, indent=1)}\n\n"
-                "First, in comments at the top of your script, state your "
-                "DECISIONS with justification from the evidence: "
-                "WHETHER TO SIMULATE at all - render the image only if one "
-                "of these triggers applies and name it: (1) the objective "
-                "demands the image, (2) comparison against an experimental "
-                "image, (3) generating training data, (4) testing defect "
-                "visibility under the imaging conditions, (5) the "
-                "image-vs-structure verification cross-check is wanted. If "
-                "none applies, SKIP the simulation and answer from the 3D "
-                "structure tools alone (seconds instead of GPU-minutes); "
-                "then beam "
-                "orientation (which axis gives the zone axis the objective "
-                "asks for, and keeps the feature edge-on), ROI (feature-"
-                "centered window vs apex-inclusive vs no crop - respect the "
-                "memory budget), and expected quality rung. Then write ONE "
-                "python script that executes: prepare the slab, simulate the "
-                "HAADF image under the metadata conditions, and run "
-                "structure_defect_map on the same slab. End by printing one "
-                "line:\n"
-                "RESULT_JSON: {\"decisions\": {...}, \"files\": {label: filename "
-                "for every artifact you produced - include npy/png/meta keys "
-                "when you simulated an image}, plus whatever quantitative "
-                "result fields your analyses yielded (e.g. "
-                "n_columns_structure, ptm_fractions, community compositions)}"),
-            "RESULT_JSON:", self.commit_timeout)
+            result = self._run_phase(
+                "commit",
+                common + (
+                    f"PHASE 2 - PLAN AND EXECUTE.\nScout evidence:\n"
+                    f"{json.dumps(scout, indent=1)}\n\n"
+                    "First, in comments at the top of your script, state your "
+                    "DECISIONS with justification from the evidence: whether "
+                    "to simulate (name the trigger, else skip), beam "
+                    "orientation / ROI respecting the memory budget, and the "
+                    "analyses the objective requires. Then execute them. End "
+                    "with one line:\nRESULT_JSON: {\"decisions\": {...}, "
+                    "\"files\": {label: filename for every artifact}, plus "
+                    "your quantitative result fields}"),
+                "RESULT_JSON:", workdir, timeout=self.commit_timeout)
 
-        gate = self._gate(result)
+            gate = self._gate(result, workdir)
 
-        decisions = "\n".join(
-            l for l in (self.workdir / "commit_1.py").read_text().splitlines()
-            if l.startswith("#"))[:6000] if (self.workdir / "commit_1.py").exists() else ""
+            decisions = ""
+            commit_file = workdir / "commit_1.py"
+            if commit_file.exists():
+                decisions = "\n".join(
+                    l for l in commit_file.read_text().splitlines()
+                    if l.startswith("#"))[:6000]
 
-        raw = self._llm("interpret", [{"role": "user", "content":
-            common + (
+            raw = self._llm("interpret", common + (
                 f"PHASE 3 - INTERPRET.\nScout evidence:\n"
                 f"{json.dumps(scout, indent=1)}\n\nExecution results:\n"
                 f"{json.dumps(result, indent=1)}\n\nVerification gate:\n"
-                f"{json.dumps(gate, indent=1)}\n\n"
-                "Produce the scientific interpretation as a single fenced "
-                "```json block with exactly these fields:\n"
-                '{"detailed_analysis": "ONE SINGLE STRING (not a list) of 3-6 plain-prose paragraphs (no '
-                "markdown syntax) interpreting the data and analysis: what "
-                "was measured/computed, what the numbers show, and the "
-                "direct quantitative answer to the objective\", "
-                '"scientific_claims": [2-4 items, each '
-                '{"claim": one-sentence finding, '
-                '"scientific_impact": why it matters, '
-                '"has_anyone_question": a literature-search question phrased '
-                "'Has anyone ...?', "
-                '"keywords": [3-6 terms]}], '
-                '"caveats": "short plain-prose statement of limitations '
-                '(gate results, quality rung, single-snapshot thermal '
-                'statistics, foil thickness)"}')}])
-        interpretation = self._parse_interpretation(raw)
-        md = [interpretation.get("detailed_analysis", "")]
-        for i, c in enumerate(interpretation.get("scientific_claims", []), 1):
-            md.append(f"\n**Claim {i}:** {c.get('claim', '')}\n"
-                      f"- Impact: {c.get('scientific_impact', '')}\n"
-                      f"- Literature: {c.get('has_anyone_question', '')}\n"
-                      f"- Keywords: {', '.join(c.get('keywords', []))}")
-        if interpretation.get("caveats"):
-            md.append(f"\n**Caveats:** {interpretation['caveats']}")
-        answer = "\n".join(md)
-        (self.workdir / "final_answer.md").write_text(answer)
-        (self.workdir / "interpretation.json").write_text(
-            json.dumps(interpretation, indent=1))
-        from .report import build_html_report
-        images = {}
-        files = result.get("files") or {}
-        if files.get("png"):
-            images["Simulated HAADF-STEM"] = files["png"]
-        # sweep every png any phase produced anywhere under the workdir
-        for extra in sorted(self.workdir.rglob("*.png"))[:8]:
-            label = extra.stem.replace("_", " ")
-            if str(extra.name) != str(files.get("png", "")):
-                images.setdefault(label, str(extra))
-        report = build_html_report(
-            str(self.workdir), objective, metadata, scout, result, gate,
-            interpretation, decisions_text=decisions, images=images)
-        return {"status": "success" if gate.get("passed") else "gate_failed",
-                "scout": scout, "result": result, "gate": gate,
-                "answer": answer, "interpretation": interpretation,
-                "report_html": report}
+                f"{json.dumps(gate, indent=1)}\n\n" + _INTERPRET_SCHEMA),
+                workdir)
+            interpretation = self._parse_interpretation(raw, workdir)
+            (workdir / "interpretation.json").write_text(
+                json.dumps(interpretation, indent=1))
+
+            claims = self._validate_scientific_claims(
+                interpretation.get("scientific_claims", []))
+
+            images = {}
+            files = result.get("files") or {}
+            if files.get("png"):
+                images["Simulated HAADF-STEM"] = files["png"]
+            for extra in sorted(workdir.rglob("*.png"))[:8]:
+                if str(extra.name) != str(files.get("png", "")):
+                    images.setdefault(extra.stem.replace("_", " "),
+                                      str(extra))
+            report = build_html_report(
+                str(workdir), objective, metadata, scout, result, gate,
+                interpretation, decisions_text=decisions, images=images)
+
+            status = "success" if gate.get("passed") else "partial"
+            out = {"status": status,
+                   "detailed_analysis": interpretation.get(
+                       "detailed_analysis", ""),
+                   "scientific_claims": claims,
+                   "caveats": interpretation.get("caveats", ""),
+                   "output_directory": str(workdir),
+                   "gate": gate, "scout": scout, "result": result,
+                   "report_html": report}
+            if status == "partial":
+                out["warnings"] = ["deterministic verification gate failed - "
+                                   "see gate field"]
+            (workdir / "analysis_results.json").write_text(
+                json.dumps(self._make_json_safe(out), indent=1))
+            return out
+        except Exception as exc:  # noqa: BLE001 - agent must return, not raise
+            self.logger.exception("point-cloud analysis failed")
+            return {"status": "error", "output_directory": str(workdir),
+                    "error": {"error": f"{type(exc).__name__}: {exc}"}}
+
+    @staticmethod
+    def _make_json_safe(obj):
+        if isinstance(obj, dict):
+            return {k: PointCloudAnalysisAgent._make_json_safe(v)
+                    for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [PointCloudAnalysisAgent._make_json_safe(v) for v in obj]
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj

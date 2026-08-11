@@ -142,7 +142,131 @@ def feature_profile(atoms, beam_axis: str, bins: int = 24) -> dict:
             "profile": prof}
 
 
+_ELEMENTS = None
+
+
+def _element_set():
+    global _ELEMENTS
+    if _ELEMENTS is None:
+        from ase.data import chemical_symbols
+        _ELEMENTS = set(chemical_symbols[1:])
+    return _ELEMENTS
+
+
+def classify_cloud_kind(structure_path: str) -> dict:
+    """Cheap pre-load classification of a point-cloud file's KIND.
+
+    Distinguishes, from headers and species tokens alone (no full load):
+      - simulated_lattice: LAMMPS data file, or xyz/extxyz with element
+        species (an extxyz Lattice record is a strong simulated tell)
+      - apt_ranged: xyz/csv whose species tokens include molecular ions
+        (e.g. FeO, Cr2) - an APT-only signature - or pos/apt with a
+        sidecar .rrng
+      - apt_unranged: numeric species column (mass-to-charge), or
+        pos/epos/apt with no range file - ranging required before analysis
+      - crystal_definition: CIF (build a supercell before atomistic tools)
+    Returns kind, confidence, and the evidence used; downstream planning
+    should trust the evidence over the label when they disagree.
+    """
+    from pathlib import Path
+
+    path = Path(structure_path)
+    ext = path.suffix.lower()
+    ev: dict = {"extension": ext or "(none)"}
+    rrng = [p.name for p in path.parent.glob("*.rrng")] +            [p.name for p in path.parent.glob("*.RRNG")]
+    ev["range_files_in_dir"] = rrng
+
+    def _out(kind, conf, reason):
+        return {"kind": kind, "confidence": conf, "reason": reason,
+                "evidence": ev}
+
+    if ext == ".cif":
+        return _out("crystal_definition", "high", "CIF crystal definition")
+    if ext in (".pos", ".epos", ".apt"):
+        if rrng:
+            return _out("apt_ranged", "high",
+                        "APT reconstruction with range file present")
+        return _out("apt_unranged", "high",
+                    "APT reconstruction, no .rrng in directory - ranging "
+                    "required before species-resolved analysis")
+
+    head = ""
+    try:
+        head = path.read_text(errors="ignore")[:8192]
+    except OSError as exc:
+        return _out("unknown", "low", f"unreadable: {exc}")
+
+    low = head.lower()
+    if " atoms" in low and " atom types" in low:
+        return _out("simulated_lattice", "high", "LAMMPS data file header")
+
+    lines = [l for l in head.splitlines() if l.strip()]
+    if ext in (".xyz", ".extxyz") and len(lines) >= 3:
+        ev["xyz_count_header"] = lines[0].strip().isdigit()
+        ev["extxyz_lattice_record"] = "lattice=" in lines[1].lower()
+        first_atom = lines[2].split()
+        tok = first_atom[0] if first_atom else ""
+        try:
+            float(tok)
+            numeric_species = True
+        except ValueError:
+            numeric_species = False
+        ev["first_species_token"] = tok
+        if numeric_species:
+            return _out("apt_unranged", "medium",
+                        "numeric species column (mass-to-charge?) - provide "
+                        "a .rrng and range first (apt_ccd tools)")
+        known = tok in _element_set()
+        molecular = (not known) and any(c.isdigit() for c in tok) or                     (not known and len(tok) > 2)
+        ev["species_is_element"] = known
+        if molecular:
+            return _out("apt_ranged", "medium",
+                        f"species token {tok!r} looks like a molecular ion "
+                        "(APT-only signature)")
+        if ev["extxyz_lattice_record"]:
+            return _out("simulated_lattice", "high",
+                        "extxyz with Lattice record")
+        return _out("simulated_lattice", "medium",
+                    "element species; simulated or ranged-APT - use density/"
+                    "NN statistics downstream to confirm (full-density sharp "
+                    "lattice = simulated; ~40-80% density = APT)")
+
+    if ext == ".csv" and lines:
+        cols = lines[0].replace(";", ",").split(",")
+        ncols = len(cols)
+        ev["csv_columns"] = ncols
+        if ncols == 4:
+            return _out("apt_unranged", "medium",
+                        "4-column csv (x,y,z,Da?) - the apt_ccd route with a "
+                        ".rrng handles this directly")
+        if ncols == 3:
+            return _out("unknown", "low",
+                        "3-column csv: coordinates without species - "
+                        "species information is required for analysis")
+
+    return _out("unknown", "low", "no recognized point-cloud signature")
+
+
 TOOL_SPECS = [
+    ToolSpec(
+        name="classify_cloud_kind",
+        description=("Cheap pre-load classification of a point-cloud file: "
+                     "simulated_lattice / apt_ranged / apt_unranged / "
+                     "crystal_definition, with the header/species evidence "
+                     "used. Decides which tool families are legal."),
+        parameters={"structure_path": {"type": "string",
+                                       "description": "path to the file"}},
+        required=["structure_path"],
+        import_line=("from scilink.skills.stem_simulation.haadf_workflow"
+                     ".scout_tools import classify_cloud_kind"),
+        signature="classify_cloud_kind(structure_path) -> dict",
+        agents=["simulation"],
+        when_to_use=("FIRST scouting step on any point cloud: the kind "
+                     "gates lattice-resolved vs statistical tools and "
+                     "flags unranged APT data needing a .rrng."),
+        returns="kind, confidence, reason, evidence dict",
+        example="kind = classify_cloud_kind('tip.xyz')",
+    ),
     ToolSpec(
         name="profile_pointcloud",
         description=("Cheap shape/species overview of a point cloud: extents, "

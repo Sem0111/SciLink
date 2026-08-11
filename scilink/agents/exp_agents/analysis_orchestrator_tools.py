@@ -725,6 +725,73 @@ def _effective_full_result(record: dict) -> dict:
         full_result["detailed_analysis"] = revisions[-1]["revised_analysis"]
     return full_result
 
+
+def _sniff_point_cloud(path, extension):
+    """Additive point-cloud detection for examine_data (extension+content
+    sniff only - no .npy heuristic changes). Returns a partial result dict
+    or None. Sub-kind discrimination beyond cheap tells is the point-cloud
+    agent's scout phase, not the router's job."""
+    tell = None
+    if extension == ".cif":
+        tell = ("crystal_definition", "CIF crystal definition (structure "
+                "building path)")
+    elif extension in (".pos", ".epos", ".apt"):
+        rrng = list(path.parent.glob("*.rrng")) + list(path.parent.glob("*.RRNG"))
+        tell = ("apt_reconstruction",
+                "APT reconstruction" + (" with range file present" if rrng
+                                        else "; no .rrng found - ranging needed"))
+    elif extension in (".xyz", ".extxyz"):
+        try:
+            lines = [l for l in path.read_text(errors="ignore")[:4096]
+                     .splitlines() if l.strip()]
+            if lines and lines[0].strip().isdigit():
+                tok = lines[2].split()[0] if len(lines) >= 3 else ""
+                numeric = False
+                try:
+                    float(tok)
+                    numeric = True
+                except ValueError:
+                    pass
+                tell = ("atomistic_point_cloud",
+                        "xyz point cloud; "
+                        + ("NUMERIC species column - likely unranged APT "
+                           "(mass-to-charge), a .rrng will be needed"
+                           if numeric else
+                           f"species token {tok!r}; simulated structure or "
+                           "ranged APT export - the point-cloud agent's "
+                           "scout discriminates"))
+        except OSError:
+            pass
+    elif extension in (".data", ".lmp", ""):
+        try:
+            head = path.read_text(errors="ignore")[:4096].lower()
+            if " atoms" in head and " atom types" in head:
+                tell = ("simulated_lattice", "LAMMPS data file")
+        except (OSError, UnicodeDecodeError):
+            pass
+    elif extension == ".csv":
+        try:
+            first = path.read_text(errors="ignore")[:2048].splitlines()[0]
+            cols = first.replace(";", ",").split(",")
+            vals = []
+            for c in cols:
+                try:
+                    vals.append(float(c))
+                except ValueError:
+                    pass
+            if len(cols) >= 3 and len(vals) == len(cols):
+                tell = ("point_cloud_candidate",
+                        f"headerless {len(cols)}-numeric-column csv - could "
+                        "be a point cloud (x,y,z[,Da]) or tabular data; "
+                        "suggesting both agents")
+        except (OSError, IndexError):
+            pass
+    if tell is None:
+        return None
+    subtype, note = tell
+    return {"data_type": "point_cloud", "point_cloud_subtype": subtype,
+            "note": note}
+
 class AnalysisOrchestratorTools:
     """
     Manages tool definitions, schemas, and execution for the AnalysisOrchestratorAgent.
@@ -1410,6 +1477,30 @@ class AnalysisOrchestratorTools:
                 result["file_size_bytes"] = file_size
                 result["extension"] = extension
                 
+                # Point clouds (xyz/extxyz, LAMMPS, CIF, APT formats,
+                # numeric csv) - additive branch, ahead of raster/tabular
+                pc = _sniff_point_cloud(path, extension)
+                if pc is not None:
+                    result.update(pc)
+                    pc_ids = [i for i, info in
+                              getattr(self.orch, "_agent_registry", {}).items()
+                              if "pointcloud" in
+                              str(info.get("name", "")).lower()]
+                    if pc["point_cloud_subtype"] == "point_cloud_candidate":
+                        result["suggested_agents"] = [0] + pc_ids
+                        result["primary_suggestion"] = (pc_ids[0] if pc_ids
+                                                        else 0)
+                    elif pc_ids:
+                        result["suggested_agents"] = pc_ids
+                        result["primary_suggestion"] = pc_ids[0]
+                    else:
+                        result["suggested_agents"] = []
+                        result["note"] += (" (no point-cloud agent "
+                                           "registered)")
+                    self.orch.current_data_path = str(path.absolute())
+                    self.orch.current_data_type = result["data_type"]
+                    return json.dumps(result)
+
                 # Determine data type based on extension and content
                 if extension in ['.tif', '.tiff', '.png', '.jpg', '.jpeg', '.bmp']:
                     result["data_type"] = "microscopy"

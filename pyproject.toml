@@ -125,6 +125,7 @@ scilink-mcp = "scilink.cli.serve:main"
 #   [project.entry-points."scilink.agents"]
 #   my_xrd_agent = "my_package.agents:MyXRDAgent"
 [project.entry-points."scilink.agents"]
+pointcloud = "scilink.agents.pointcloud_agents.pointcloud_agent:PointCloudAnalysisAgent"
 
 # Third-party packages can advertise structure-database backends here.
 # Each entry maps a name (used as the `sources=` key in search_structures)

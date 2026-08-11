@@ -115,6 +115,25 @@ def read_structure(structure_path: str, type_map: dict | None = None,
         info.update(format="lammps-data", type_map=mapping)
         return atoms, info
 
+    if path.suffix.lower() == ".csv":
+        raise ValueError(
+            f"{path.name}: csv point clouds carry no chemical species - if "
+            "this is APT data (x,y,z,Da), use the apt_ccd route with a .rrng "
+            "(neighborhoods_from_apt); ase/abtem tools need element symbols")
+    if path.suffix.lower() in (".xyz", ".extxyz"):
+        head = path.read_text(errors="ignore")[:4096].splitlines()
+        atom_line = head[2].split() if len(head) >= 3 else []
+        if atom_line:
+            try:
+                float(atom_line[0])
+                raise ValueError(
+                    f"{path.name}: species column is numeric - this looks "
+                    "like an UNRANGED APT export (mass-to-charge). Provide a "
+                    ".rrng and range it first (apt_ccd tools), or supply a "
+                    "species-labelled export")
+            except ValueError as exc:
+                if "UNRANGED" in str(exc):
+                    raise
     images = read(path, index=":")
     if isinstance(images, Atoms):
         images = [images]

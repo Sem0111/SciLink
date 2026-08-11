@@ -313,7 +313,9 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                     "orientation / ROI respecting the memory budget, and the "
                     "analyses the objective requires. Then execute them. End "
                     "with one line:\nRESULT_JSON: {\"decisions\": {...}, "
-                    "\"files\": {label: filename for every artifact}, plus "
+                    "\"files\": {label: filename for every artifact - when you "
+                    "simulated an image use EXACTLY the keys \"npy\", "
+                    "\"png\", \"meta\" for its three artifacts}, plus "
                     "your quantitative result fields}"),
                 "RESULT_JSON:", workdir, timeout=self.commit_timeout)
 

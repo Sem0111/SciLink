@@ -140,11 +140,46 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
     bulk distribution, negative = depleted); also writes the community-
     labelled point cloud (.xyz) and plots into ``savedir``.
     """
+    import re as _re
+
     from ._ccd.ccd import detect_compositional_communities
+
+    # Sanitize ignore_ions against the labels actually present: the csv
+    # carries rrng formula labels (H1, C2, Cr1O1, ...) while callers pass
+    # element names (H, C). A requested element expands to every label
+    # composed SOLELY of requested elements (drops H1/H2/C1N1, keeps Fe1H1);
+    # unmatched requests are dropped with a note instead of crashing the
+    # vendored pipeline (ValueError: list.remove).
+    ignored_effective, ignored_unmatched = [], []
+    if ignore_ions:
+        header = Path(neighborhood_csv).open().readline().strip().split(",")
+        present = [c[1:] for c in header if c.startswith("p")]
+
+        def _elems(label):
+            return {sym for sym, _ in
+                    _re.findall(r"([A-Z][a-z]?)(\d*)", label) if sym}
+
+        req_elems = set()
+        for tok in ignore_ions:
+            if tok in present:
+                ignored_effective.append(tok)
+            else:
+                req_elems |= _elems(tok)
+        for lab in present:
+            if lab not in ignored_effective and _elems(lab) <= req_elems \
+                    and _elems(lab):
+                ignored_effective.append(lab)
+        ignored_unmatched = [t for t in ignore_ions
+                             if t not in present
+                             and not any(_elems(t) & _elems(l)
+                                         for l in ignored_effective)]
     res = detect_compositional_communities(
         neighborhood_csv, savedir=savedir,
         k_values=k_values or [4, 5, 6],
-        ignore_ions=ignore_ions or [], n_repeats=n_repeats, q=q)
+        ignore_ions=ignored_effective, n_repeats=n_repeats, q=q)
+    res["ignored_ion_labels"] = ignored_effective
+    if ignored_unmatched:
+        res["ignore_requests_unmatched"] = ignored_unmatched
     res = _jsonable(res)
     stem = Path(neighborhood_csv).stem
     res["community_xyz"] = str(Path(savedir) / f"{stem}_community_clustering.xyz")

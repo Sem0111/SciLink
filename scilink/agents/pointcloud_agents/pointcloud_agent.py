@@ -136,7 +136,11 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
     def _llm(self, tag: str, prompt: str, workdir: Path) -> str:
         t0 = time.time()
         response = self.model.generate_content(prompt)
-        text = response.text if hasattr(response, "text") else str(response)
+        # raw_text, not .text: the wrapper's .text applies a JSON-extraction
+        # heuristic that mangles fenced code responses
+        text = (getattr(response, "raw_text", None)
+                or (response.text if hasattr(response, "text")
+                    else str(response)))
         self.transcript.append({"phase": tag,
                                 "elapsed_s": round(time.time() - t0, 1),
                                 "prompt": prompt[-4000:], "response": text})

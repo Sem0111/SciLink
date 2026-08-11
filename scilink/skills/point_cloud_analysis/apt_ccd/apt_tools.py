@@ -49,8 +49,30 @@ def _jsonable(obj):
 def neighborhoods_from_apt(pos_path: str, rrng_path: str,
                            radius_nm: float = 1.0, overlap: float = 0.5,
                            savedir: str = "ccd_analysis") -> dict:
-    """Overlapping spherical composition neighborhoods from real APT data."""
+    """Overlapping spherical composition neighborhoods from real APT data.
+
+    .pos is read by the vendored pipeline directly. An AP Suite ``.apt``
+    binary is first converted (via apav) to the pipeline's csv route
+    (x, y, z, Da) - the vendored readers predate the .apt format.
+    """
     from ._ccd.ccd import generate_neighborhoods
+
+    src = Path(pos_path)
+    if src.suffix.lower() == ".apt":
+        try:
+            import apav
+        except ImportError as exc:
+            raise ImportError(
+                ".apt binaries need apav (pip install apav) - or export a "
+                ".pos from AP Suite instead") from exc
+        out = Path(savedir)
+        out.mkdir(parents=True, exist_ok=True)
+        roi = apav.load_apt(str(src))
+        conv = out / f"{src.stem}.csv"
+        np.savetxt(conv, np.column_stack([roi.xyz, roi.mass]),
+                   delimiter=",", fmt="%.5f")
+        pos_path = str(conv)
+
     res = generate_neighborhoods(pos_path, rrng_path, savedir=savedir,
                                  radius=radius_nm, overlap=overlap)
     res["neighborhood_csv"] = str(

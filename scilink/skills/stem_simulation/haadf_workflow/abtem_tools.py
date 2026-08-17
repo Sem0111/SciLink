@@ -333,6 +333,7 @@ def _resolve_device(device: str) -> str:
 
 def simulate_haadf(atoms: Atoms, microscope: dict, pot_sampling_A: float = 0.04,
                    scan_sampling_A: float = 0.2, slice_thickness_A: float = 1.0,
+                   algorithm: str = "multislice",
                    prism_interpolation: int = 4, device: str = "auto",
                    out_prefix: str = "haadf", workdir: str = ".") -> dict:
     """Run a PRISM HAADF scan and write image + analysis-ready metadata.
@@ -341,6 +342,12 @@ def simulate_haadf(atoms: Atoms, microscope: dict, pot_sampling_A: float = 0.04,
 
         {"energy_kev": 300, "convergence_mrad": 25.0,
          "haadf_inner_mrad": 65, "haadf_outer_mrad": 200, "defocus_A": 0.0}
+
+    ``algorithm``: "multislice" (DEFAULT - the exact reference method; cost
+    scales with probe positions and can reach hours for large scans) or
+    "prism" (accelerated factorization, minor interpolation smoothing -
+    choose it for large fields WITH the tradeoff stated). When a caller or
+    objective names an algorithm, that choice is binding.
 
     Writes ``<out_prefix>.npy`` (raw image, x-first transposed to rows=y),
     ``<out_prefix>.png`` and ``<out_prefix>_meta.json`` (with ``fov_nm`` and
@@ -355,15 +362,22 @@ def simulate_haadf(atoms: Atoms, microscope: dict, pot_sampling_A: float = 0.04,
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
 
-    ladder = [(pot_sampling_A, prism_interpolation),
-              (max(pot_sampling_A, 0.05), prism_interpolation),
-              (max(pot_sampling_A, 0.05), 6)]
+    if algorithm not in ("multislice", "prism"):
+        raise ValueError(f"algorithm must be multislice or prism, "
+                         f"got {algorithm!r}")
+    if algorithm == "prism":
+        ladder = [(pot_sampling_A, prism_interpolation),
+                  (max(pot_sampling_A, 0.05), prism_interpolation),
+                  (max(pot_sampling_A, 0.05), 6)]
+    else:
+        ladder = [(pot_sampling_A, None),
+                  (max(pot_sampling_A, 0.05), None)]
     last_err: Exception | None = None
     for attempt, (pot, interp) in enumerate(ladder):
         try:
             return _simulate_once(atoms, microscope, pot, scan_sampling_A,
-                                  slice_thickness_A, interp, out_prefix,
-                                  workdir, attempt)
+                                  slice_thickness_A, algorithm, interp,
+                                  out_prefix, workdir, attempt)
         except Exception as exc:  # noqa: BLE001 - inspect for OOM, else re-raise
             name = f"{type(exc).__name__}: {exc}".lower()
             if not any(m in name for m in _OOM_MARKERS):
@@ -376,7 +390,8 @@ def simulate_haadf(atoms: Atoms, microscope: dict, pot_sampling_A: float = 0.04,
 
 
 def _simulate_once(atoms, microscope, pot_sampling, scan_sampling,
-                   slice_thickness, interp, out_prefix, workdir, attempt):
+                   slice_thickness, algorithm, interp, out_prefix, workdir,
+                   attempt):
     import abtem
 
     det = plan_haadf_detector(microscope["energy_kev"],
@@ -390,11 +405,19 @@ def _simulate_once(atoms, microscope, pot_sampling, scan_sampling,
                                      outer=det["outer_mrad_effective"])
     scan = abtem.GridScan(start=(0, 0), end=potential.extent,
                           sampling=scan_sampling)
-    s_matrix = abtem.SMatrix(potential=potential,
-                             energy=microscope["energy_kev"] * 1e3,
-                             semiangle_cutoff=microscope["convergence_mrad"],
-                             interpolation=interp)
-    measurement = s_matrix.scan(scan=scan, detectors=detector).compute()
+    if algorithm == "prism":
+        s_matrix = abtem.SMatrix(
+            potential=potential, energy=microscope["energy_kev"] * 1e3,
+            semiangle_cutoff=microscope["convergence_mrad"],
+            interpolation=interp)
+        measurement = s_matrix.scan(scan=scan, detectors=detector).compute()
+    else:
+        probe = abtem.Probe(energy=microscope["energy_kev"] * 1e3,
+                            semiangle_cutoff=microscope["convergence_mrad"],
+                            defocus=microscope.get("defocus_A", 0.0))
+        probe.grid.match(potential)
+        measurement = probe.scan(potential, scan=scan,
+                                 detectors=detector).compute()
     if hasattr(measurement, "to_cpu"):
         measurement = measurement.to_cpu()
     img = np.asarray(measurement.array)
@@ -420,14 +443,15 @@ def _simulate_once(atoms, microscope, pot_sampling, scan_sampling,
         "extent_A": extent,
         "scan_sampling_A": scan_sampling,
         "pot_sampling_A": pot_sampling,
-        "prism_interpolation": interp,
+        "algorithm": algorithm,
+        "prism_interpolation": interp if algorithm == "prism" else None,
         "oom_ladder_attempt": attempt,
         "png_source_blur_A": blur_A,
         "npy_is_raw": True,
         "n_atoms": len(atoms),
         "note": ("PRISM interpolation 6 trades accuracy for memory: coarser "
                  "plane-wave sampling can subtly smooth fine HAADF contrast"
-                 if interp >= 6 else ""),
+                 if algorithm == "prism" and (interp or 0) >= 6 else ""),
     }
     with open(workdir / f"{out_prefix}_meta.json", "w") as fh:
         json.dump(meta, fh, indent=1)
@@ -650,11 +674,14 @@ TOOL_SPECS = [
     ),
     ToolSpec(
         name="simulate_haadf",
-        description=("PRISM HAADF-STEM simulation with GPU auto-detection, "
-                     "antialias-capped detector annulus and an out-of-memory "
-                     "fallback ladder. Writes image .npy/.png plus metadata "
-                     "with fov_nm/pixel_size_nm for the image_analysis "
-                     "skills."),
+        description=("HAADF-STEM simulation - true MULTISLICE by default "
+                     "(exact; cost scales with probe positions), PRISM as "
+                     "the opt-in accelerated mode for large fields (state "
+                     "the interpolation tradeoff). A caller- or objective-"
+                     "named algorithm is BINDING. GPU auto-detect, "
+                     "antialias-capped annulus, OOM fallback ladder; writes "
+                     ".npy/.png + metadata with fov_nm/pixel_size_nm and "
+                     "the algorithm used."),
         parameters={
             "microscope": _MICROSCOPE_PARAM,
             "pot_sampling_A": {"type": "number",
@@ -668,8 +695,9 @@ TOOL_SPECS = [
         import_line=("from scilink.skills.stem_simulation.haadf_workflow"
                      ".abtem_tools import simulate_haadf"),
         signature=("simulate_haadf(atoms, microscope, pot_sampling_A=0.04, "
-                   "scan_sampling_A=0.2, prism_interpolation=4, "
-                   "device='auto', out_prefix='haadf', workdir='.') -> dict"),
+                   "scan_sampling_A=0.2, algorithm='multislice', "
+                   "prism_interpolation=4, device='auto', "
+                   "out_prefix='haadf', workdir='.') -> dict"),
         agents=["simulation"],
         when_to_use=("After slab preparation, to render the HAADF image. "
                      "Needs abtem (+ cupy for GPU); on CPU it runs but "

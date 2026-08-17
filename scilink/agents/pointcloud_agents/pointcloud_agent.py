@@ -75,6 +75,12 @@ subsets/cropping for expensive analyses (DXA or full-cloud graph analyses
 on >1M atoms can exceed the budget; a representative subset with the
 subsetting stated is better than a timeout).
 
+SIMULATION ALGORITHM: simulate_haadf defaults to TRUE MULTISLICE (exact);
+PRISM is opt-in for large fields with the smoothing tradeoff stated. An
+algorithm named in the objective is BINDING - never silently substitute;
+fit the requested algorithm to budget by shrinking the field or coarsening
+the scan step instead.
+
 WHETHER TO SIMULATE an image - only if a trigger applies and you name it:
 (1) the objective demands the image, (2) comparison against an experimental
 image, (3) generating training data, (4) testing defect visibility under

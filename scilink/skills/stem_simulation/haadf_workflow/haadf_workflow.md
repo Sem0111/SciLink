@@ -77,6 +77,19 @@ a hypothesis loop:
 - Run the identical detection + classification pipeline on both images -
   never one method on the experiment and another on the simulation.
 
+### algorithm selection (binding)
+- `simulate_haadf` runs TRUE MULTISLICE by default - the exact reference
+  method. Its cost scales with probe positions x slices: budget scan area
+  and step accordingly (coarsen scan_sampling_A or shrink the field before
+  abandoning multislice).
+- PRISM (`algorithm="prism"`) is the accelerated factorization for large
+  fields/scans; interpolation introduces minor smoothing of fine HAADF
+  contrast - when choosing it, STATE the tradeoff in your decisions.
+- An algorithm named by the objective or caller is BINDING. Never silently
+  substitute one for the other; if the requested algorithm cannot fit the
+  compute budget, shrink the field/coarsen sampling and say so, or report
+  the conflict - do not swap algorithms.
+
 ### compute and memory
 
 - Device auto-detection: cupy present -> GPU, else CPU with a loud

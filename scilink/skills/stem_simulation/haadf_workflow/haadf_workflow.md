@@ -90,6 +90,15 @@ a hypothesis loop:
   compute budget, shrink the field/coarsen sampling and say so, or report
   the conflict - do not swap algorithms.
 
+### PRISM window-size rule (learned from a corrupted run)
+- PRISM reconstructs the probe in windows of lateral_extent/interpolation.
+  That window MUST comfortably exceed the probe diameter including tails
+  (>= ~20-25 A for a 25 mrad probe at 300 kV). On small fields interp 4 can
+  shrink the window below this (e.g. 50 A field -> 12 A window), producing
+  patchwork/phantom-lattice artifacts that FFT spacing checks DO NOT catch.
+  Small field => lower interpolation (2) or use multislice; never let
+  extent/interpolation drop below ~20 A.
+
 ### compute and memory
 
 - Device auto-detection: cupy present -> GPU, else CPU with a loud

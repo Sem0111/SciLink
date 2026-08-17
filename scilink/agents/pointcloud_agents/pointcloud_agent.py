@@ -75,6 +75,14 @@ subsets/cropping for expensive analyses (DXA or full-cloud graph analyses
 on >1M atoms can exceed the budget; a representative subset with the
 subsetting stated is better than a timeout).
 
+PRISM WINDOW RULE: extent/interpolation must exceed ~20-25 A (probe with
+tails); on small fields lower the interpolation or use multislice - window
+artifacts produce phantom lattices that FFT checks miss.
+MULTISLICE RUNTIME: cost ~ probe positions x slices; on a 16 GB T4 budget
+roughly 10-30k scan positions within an hour - coarsen scan step (0.25-0.3
+A is fine for lattice metrology) and keep the field modest; write progress
+to progress.log so long scans are diagnosable.
+
 SIMULATION ALGORITHM: simulate_haadf defaults to TRUE MULTISLICE (exact);
 PRISM is opt-in for large fields with the smoothing tradeoff stated. An
 algorithm named in the objective is BINDING - never silently substitute;

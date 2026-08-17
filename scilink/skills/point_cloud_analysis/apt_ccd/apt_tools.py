@@ -180,6 +180,18 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
     res["ignored_ion_labels"] = ignored_effective
     if ignored_unmatched:
         res["ignore_requests_unmatched"] = ignored_unmatched
+    # Make compositions self-describing: {community_id: {ion: signed_KS}}
+    # instead of a bare list-of-lists whose ion order lives in a side file.
+    header = Path(neighborhood_csv).open().readline().strip().split(",")
+    ions = sorted(c[1:] for c in header if c.startswith("p"))
+    ions = [i for i in ions if i not in ignored_effective]
+    raw = res.get("community_compositions")
+    if isinstance(raw, (list, tuple)):
+        res["community_compositions"] = {
+            str(cid): {ion: round(float(ks), 4)
+                       for ion, ks in zip(ions, row)}
+            for cid, row in enumerate(raw)}
+        res["community_composition_ions"] = ions
     res = _jsonable(res)
     stem = Path(neighborhood_csv).stem
     res["community_xyz"] = str(Path(savedir) / f"{stem}_community_clustering.xyz")
@@ -291,8 +303,9 @@ TOOL_SPECS = [
                      "characterize segregated regions; positive KS = "
                      "enriched, negative = depleted vs bulk."),
         returns=("community_count, community_neighborhood_counts, "
-                 "community_compositions (signed KS per ion), "
-                 "community_xyz point cloud"),
+                 "community_compositions as {community_id: {ion_label: "
+                 "signed KS}} (positive = enriched vs bulk), "
+                 "community_map_png, community_xyz point cloud"),
         example="seg = detect_segregation(nb['neighborhood_csv'])",
     ),
 ]

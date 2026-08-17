@@ -66,6 +66,15 @@ to its normal. Defect reading from per-column 2D-PTM in an FCC matrix:
 layers = intrinsic stacking fault; HCP-FCC-HCP = extrinsic fault.
 LAMMPS files with anonymous types need type_map from the metadata species.
 
+EXECUTION ENVIRONMENT: numpy >= 2 (arr.ptp() was REMOVED - use
+np.ptp(arr); always `import numpy as np` explicitly). Your script may be
+KILLED at its timeout and stdout is then lost - for any step that could run
+minutes, append progress lines to a file `progress.log` (open with
+buffering=1) so a timeout is diagnosable, and prefer spatial
+subsets/cropping for expensive analyses (DXA or full-cloud graph analyses
+on >1M atoms can exceed the budget; a representative subset with the
+subsetting stated is better than a timeout).
+
 WHETHER TO SIMULATE an image - only if a trigger applies and you name it:
 (1) the objective demands the image, (2) comparison against an experimental
 image, (3) generating training data, (4) testing defect visibility under
@@ -161,7 +170,7 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
 
         Returns the JSON payload printed on the marker line."""
         current = prompt
-        for attempt in (1, 2):
+        for attempt in (1, 2, 3):
             code = self._extract_code(self._llm(f"{tag}_{attempt}", current,
                                                 workdir))
             (workdir / f"{tag}_{attempt}.py").write_text(code)

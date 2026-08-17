@@ -308,34 +308,51 @@ def _label_element(label: str):
     return parts[0]
 
 
-def composition_from_labels(label_counts: dict) -> dict:
-    """Elemental composition from ranged ion-label counts, decomposing
-    molecular ions (Cr1O1 -> Cr + O) and EXCLUDING placeholder labels
-    ('27Da', '29Da' - unidentified mass peaks that corrupt naive tallies)."""
+def composition_from_labels(label_counts: dict,
+                            decompose: bool = False) -> dict:
+    """Composition from ranged ion-label counts.
+
+    DEFAULT (decompose=False): IONIC composition - each ranged species
+    (Fe1, Cr1O1, 27Da, ...) reported as-is in at.% of ranged ions. This is
+    the faithful APT representation: molecular ions stay molecular and
+    unidentified mass peaks stay visible as their own species.
+
+    decompose=True additionally returns an elemental estimate (molecular
+    ions split into constituent atoms, placeholder labels excluded) - use
+    ONLY when explicitly requested; decomposition injects assumptions.
+    """
     import re as _re
-    el: dict = {}
-    excluded, excluded_n, total_n = [], 0, 0
-    for label, n in label_counts.items():
-        total_n += int(n)
-        if _label_element(label) is None:
-            excluded.append(label)
-            excluded_n += int(n)
-            continue
-        for sym, cnt in _re.findall(r"([A-Z][a-z]?)(\d*)", label):
-            if sym:
-                el[sym] = el.get(sym, 0) + int(n) * (int(cnt) if cnt else 1)
-    tot = sum(el.values()) or 1
-    return {"composition_at_pct": {k: round(v / tot * 100, 2)
-                                   for k, v in sorted(el.items(),
-                                                      key=lambda kv: -kv[1])},
-            "excluded_placeholder_labels": excluded,
-            "excluded_ion_fraction_pct": round(
-                excluded_n / max(total_n, 1) * 100, 2)}
+    total = sum(int(n) for n in label_counts.values()) or 1
+    ionic = {k: round(int(v) / total * 100, 2)
+             for k, v in sorted(label_counts.items(), key=lambda kv: -kv[1])}
+    out = {"ionic_composition_at_pct": ionic,
+           "basis": "ranged ion species, no decomposition"}
+    if decompose:
+        el: dict = {}
+        excluded, excluded_n = [], 0
+        for label, n in label_counts.items():
+            if _label_element(label) is None:
+                excluded.append(label)
+                excluded_n += int(n)
+                continue
+            for sym, cnt in _re.findall(r"([A-Z][a-z]?)(\d*)", label):
+                if sym:
+                    el[sym] = el.get(sym, 0) + int(n) * (int(cnt) if cnt
+                                                         else 1)
+        tot = sum(el.values()) or 1
+        out["elemental_estimate_at_pct"] = {
+            k: round(v / tot * 100, 2)
+            for k, v in sorted(el.items(), key=lambda kv: -kv[1])}
+        out["elemental_estimate_note"] = (
+            "decomposed molecular ions; placeholder labels excluded "
+            f"({round(excluded_n / total * 100, 2)}% of ions: {excluded})")
+    return out
 
 
 def _load_ranged_positions(pos_path, rrng_path, max_points=250000):
-    """(xyz, element) for ranged ions, subsampled, apex-up convention
-    (z_plot = z_max - z so the apex sits at the top of every figure)."""
+    """(xyz, ion_species_label) for ranged ions, subsampled, apex-up
+    (z_plot = z_max - z). Species stay as ranged ion labels - NO
+    decomposition or element grouping."""
     import apav
     if str(pos_path).lower().endswith(".apt"):
         roi = apav.load_apt(str(pos_path))
@@ -350,27 +367,34 @@ def _load_ranged_positions(pos_path, rrng_path, max_points=250000):
         labels[m] = str(rr.ion.hill_formula)
     ranged = labels != ""
     xyz, labels = xyz[ranged], labels[ranged]
-    elements = np.array([_label_element(l) or "?" for l in labels])
-    keep = elements != "?"
-    xyz, elements = xyz[keep], elements[keep]
     if len(xyz) > max_points:
         sel = np.random.RandomState(0).choice(len(xyz), max_points,
                                               replace=False)
-        xyz, elements = xyz[sel], elements[sel]
+        xyz, labels = xyz[sel], labels[sel]
     xyz = xyz.copy()
     xyz[:, 2] = xyz[:, 2].max() - xyz[:, 2]
-    return xyz, elements
+    return xyz, labels.astype(str)
+
+
+def _species_color(label):
+    """Stable display color per ion species, keyed on the label's first
+    element purely for visual familiarity (display only)."""
+    el = _label_element(label)
+    base = _ELEMENT_COLORS.get(el, None)
+    if base is None:
+        base = "#%06x" % (abs(hash(label)) % 0xFFFFFF)
+    return base
 
 
 def visualize_apt_elements(pos_path: str, rrng_path: str, out_prefix: str,
-                           workdir: str = ".",
-                           max_points: int = 250000) -> dict:
-    """Element-colored atom maps of an APT reconstruction - the HERO figure.
+                           workdir: str = ".", max_points: int = 250000,
+                           max_panels: int = 9) -> dict:
+    """Ion-species atom maps of an APT reconstruction - the HERO figure.
 
-    Writes <out_prefix>_elements.png (side view, apex at TOP: one panel per
-    element plus a combined overlay) and <out_prefix>_elements_3d.html
-    (interactive plotly). Molecular ions group under their metal element;
-    placeholder labels are excluded.
+    One panel per ranged ION SPECIES (top ``max_panels`` by count; the rest
+    grouped as 'other') plus a combined overlay - apex at TOP, and an
+    interactive 3D html. Molecular ions and unidentified mass peaks appear
+    as their own species; nothing is decomposed or grouped by element.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -378,52 +402,63 @@ def visualize_apt_elements(pos_path: str, rrng_path: str, out_prefix: str,
 
     wd = Path(workdir)
     wd.mkdir(parents=True, exist_ok=True)
-    xyz, elements = _load_ranged_positions(pos_path, rrng_path, max_points)
+    xyz, labels = _load_ranged_positions(pos_path, rrng_path, max_points)
     counts: dict = {}
-    for e in elements:
-        counts[e] = counts.get(e, 0) + 1
-    els = sorted(counts, key=lambda e: -counts[e])
+    for l in labels:
+        counts[l] = counts.get(l, 0) + 1
+    species = sorted(counts, key=lambda k: -counts[k])
+    shown = species[:max_panels]
+    rest = species[max_panels:]
+    rest_n = sum(counts[r] for r in rest)
 
-    ncol = len(els) + 1
+    ncol = len(shown) + (1 if rest else 0) + 1
     fig, axes = plt.subplots(1, ncol, figsize=(2.6 * ncol, 8), sharey=True)
-    for ax, e in zip(axes[:-1], els):
-        m = elements == e
+    for ax, sp in zip(axes[:len(shown)], shown):
+        m = labels == sp
         ax.scatter(xyz[m, 0], xyz[m, 2], s=0.5, lw=0,
-                   c=_ELEMENT_COLORS.get(e, "#888888"), rasterized=True)
-        ax.set_title(f"{e} ({counts[e]:,})", fontsize=11)
+                   c=_species_color(sp), rasterized=True)
+        ax.set_title(f"{sp} ({counts[sp]:,})", fontsize=10)
+        ax.set_aspect(1)
+        ax.set_xticks([])
+    if rest:
+        ax = axes[len(shown)]
+        m = np.isin(labels, rest)
+        ax.scatter(xyz[m, 0], xyz[m, 2], s=0.5, lw=0, c="#999999",
+                   rasterized=True)
+        ax.set_title(f"other x{len(rest)} ({rest_n:,})", fontsize=10)
         ax.set_aspect(1)
         ax.set_xticks([])
     ax = axes[-1]
-    for e in reversed(els):
-        m = elements == e
+    for sp in reversed(shown):
+        m = labels == sp
         ax.scatter(xyz[m, 0], xyz[m, 2], s=0.5, lw=0, alpha=0.6,
-                   c=_ELEMENT_COLORS.get(e, "#888888"), label=e,
-                   rasterized=True)
-    ax.set_title("all elements", fontsize=11)
+                   c=_species_color(sp), label=sp, rasterized=True)
+    ax.set_title("all ranged ions", fontsize=10)
     ax.set_aspect(1)
     ax.set_xticks([])
-    ax.legend(markerscale=18, fontsize=9, loc="upper right")
+    ax.legend(markerscale=18, fontsize=8, loc="upper right")
     axes[0].set_ylabel("distance below apex [nm] (apex at top)")
     axes[0].invert_yaxis()
     png = wd / f"{out_prefix}_elements.png"
     fig.savefig(png, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
-    out = {"png": str(png), "elements": {e: counts[e] for e in els},
+    out = {"png": str(png),
+           "ion_species": {sp: counts[sp] for sp in species},
            "n_points_shown": int(len(xyz))}
     try:
         import plotly.graph_objects as go
         sub = np.random.RandomState(1).choice(
             len(xyz), min(len(xyz), 120000), replace=False)
-        xs, es = xyz[sub], elements[sub]
+        xs, ls = xyz[sub], labels[sub]
         traces = [go.Scatter3d(
-            x=xs[es == e, 0], y=xs[es == e, 1], z=-xs[es == e, 2],
-            mode="markers", name=e,
-            marker=dict(size=1.2, color=_ELEMENT_COLORS.get(e, "#888888")))
-            for e in els]
+            x=xs[ls == sp, 0], y=xs[ls == sp, 1], z=-xs[ls == sp, 2],
+            mode="markers", name=sp,
+            marker=dict(size=1.2, color=_species_color(sp)))
+            for sp in shown]
         figp = go.Figure(traces)
         figp.update_layout(scene_aspectmode="data",
-                           title="APT reconstruction - elements (apex up)",
+                           title="APT reconstruction - ion species (apex up)",
                            legend=dict(itemsizing="constant"))
         html = wd / f"{out_prefix}_elements_3d.html"
         figp.write_html(html, include_plotlyjs=True)
@@ -458,11 +493,11 @@ _IMP = "from scilink.skills.point_cloud_analysis.apt_ccd.apt_tools import "
 TOOL_SPECS = [
     ToolSpec(
         name="visualize_apt_elements",
-        description=("Element-colored atom maps of an APT reconstruction - "
-                     "the HERO figure for any APT report: per-element side "
-                     "views plus combined overlay, apex at top, and an "
-                     "interactive 3D html. Molecular ions group under their "
-                     "metal element; placeholder labels excluded."),
+        description=("Ion-species atom maps of an APT reconstruction - the "
+                     "HERO figure for any APT report: per-species side views "
+                     "(molecular ions and unidentified peaks as their own "
+                     "species - nothing decomposed), combined overlay, apex "
+                     "at top, interactive 3D html."),
         parameters={"pos_path": {"type": "string",
                                  "description": ".apt/.pos or x,y,z,Da csv"},
                     "rrng_path": {"type": "string", "description": ".rrng"}},
@@ -515,22 +550,23 @@ TOOL_SPECS = [
     ),
     ToolSpec(
         name="composition_from_labels",
-        description=("Elemental composition from ranged ion-label counts: "
-                     "decomposes molecular ions (Cr1O1 -> Cr+O) and excludes "
-                     "placeholder labels (27Da etc.) that corrupt naive "
-                     "tallies."),
+        description=("IONIC composition from ranged ion-label counts - each "
+                     "species as-is (APT standard, NO decomposition). "
+                     "decompose=True adds an elemental estimate only when "
+                     "the user explicitly requests decomposition."),
         parameters={"label_counts": {"type": "object",
                                      "description": "e.g. ion_type_counts "
                                                     "from a neighborhoods_* "
                                                     "call"}},
         required=["label_counts"],
         import_line=_IMP + "composition_from_labels",
-        signature="composition_from_labels(label_counts) -> dict",
+        signature="composition_from_labels(label_counts, decompose=False) -> dict",
         agents=["simulation"],
-        when_to_use=("Whenever reporting elemental composition from APT "
-                     "data - never tally raw ion labels directly."),
-        returns=("composition_at_pct, excluded_placeholder_labels, "
-                 "excluded_ion_fraction_pct"),
+        when_to_use=("Whenever reporting composition from APT data - "
+                     "report the IONIC composition; decompose only on "
+                     "explicit user request."),
+        returns=("ionic_composition_at_pct (+ elemental_estimate_at_pct "
+                 "when decompose=True)"),
         example="comp = composition_from_labels(nb['ion_type_counts'])",
     ),
     ToolSpec(

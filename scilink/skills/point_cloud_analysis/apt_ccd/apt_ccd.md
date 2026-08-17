@@ -54,9 +54,12 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   numbers.
 - Interactive 3D htmls (elements and communities) are produced alongside;
   the report links them as "open 3D visualization".
-- Composition reporting: ALWAYS via composition_from_labels (decomposes
-  molecular ions, excludes placeholder labels like 27Da) - never tally raw
-  ion labels; a naive tally can report absurd compositions.
+- Composition reporting: IONIC composition (composition_from_labels
+  default) - every ranged species as-is, molecular ions and unidentified
+  peaks (27Da etc.) as their own species. Do NOT decompose molecular ions
+  into elements unless the user explicitly asks (decompose=True);
+  decomposition injects assumptions and is not the APT reporting standard
+  here. Never hand-roll element tallies from labels.
 - Probing scale: 1 nm neighborhoods miss sub-nm segregation; if a targeted
   species shows no community at 1 nm, rerun at 0.5-0.75 nm before calling
   a negative.

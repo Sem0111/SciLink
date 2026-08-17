@@ -66,11 +66,17 @@ def build_html_report(workdir: str, objective: str, metadata: dict,
         interpretation = {"detailed_analysis": interpretation,
                           "scientific_claims": [], "caveats": ""}
 
+    def _resolve(f):
+        """Accept absolute paths, workdir-relative, or cwd-relative."""
+        cands = ([Path(f)] if Path(f).is_absolute()
+                 else [wd / f, Path(f)])
+        return next((c for c in cands if c.exists()), None)
+
     # first image = HERO, rendered full-width; the rest as the grid
     hero_html, images_html = "", ""
     for n, (label, f) in enumerate((images or {}).items()):
-        pth = Path(f) if Path(f).is_absolute() else wd / f
-        if not pth.exists():
+        pth = _resolve(f)
+        if pth is None:
             continue
         if n == 0:
             b64 = base64.b64encode(pth.read_bytes()).decode()
@@ -84,11 +90,18 @@ def build_html_report(workdir: str, objective: str, metadata: dict,
 
     links_html = ""
     for label, f in (interactive or {}).items():
-        pth = Path(f) if Path(f).is_absolute() else wd / f
-        if pth.exists():
-            links_html += (f'<p>&#127919; <a href="{html.escape(pth.name)}" '
-                           f'target="_blank">Open 3D visualization: '
-                           f'{html.escape(label)}</a></p>')
+        pth = _resolve(f)
+        if pth is None:
+            continue
+        try:
+            # report.html sits at the workdir root - link relative to it so
+            # files in subdirectories (out/ccd/...) resolve correctly
+            href = pth.resolve().relative_to(wd.resolve()).as_posix()
+        except ValueError:
+            href = pth.resolve().as_uri()   # outside workdir -> file:// URI
+        links_html += (f'<p>&#127919; <a href="{html.escape(href)}" '
+                       f'target="_blank">Open 3D visualization: '
+                       f'{html.escape(label)}</a></p>')
 
     badge = ('<span class="quality-badge quality-good">GATE PASSED</span>'
              if gate.get("passed") else

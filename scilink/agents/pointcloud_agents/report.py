@@ -57,6 +57,7 @@ def build_html_report(workdir: str, objective: str, metadata: dict,
                       scout: dict, result: dict, gate: dict,
                       interpretation, decisions_text: str = "",
                       images: dict | None = None, cost: dict | None = None,
+                      interactive: dict | None = None,
                       out_name: str = "report.html") -> str:
     """Assemble the report; ``interpretation`` is the structured dict from
     the interpret phase (a bare string is wrapped as detailed_analysis)."""
@@ -65,10 +66,29 @@ def build_html_report(workdir: str, objective: str, metadata: dict,
         interpretation = {"detailed_analysis": interpretation,
                           "scientific_claims": [], "caveats": ""}
 
-    images_html = "".join(
-        _img_card(Path(f) if Path(f).is_absolute() else wd / f, label)
-        for label, f in (images or {}).items()
-        if (Path(f) if Path(f).is_absolute() else wd / f).exists())
+    # first image = HERO, rendered full-width; the rest as the grid
+    hero_html, images_html = "", ""
+    for n, (label, f) in enumerate((images or {}).items()):
+        pth = Path(f) if Path(f).is_absolute() else wd / f
+        if not pth.exists():
+            continue
+        if n == 0:
+            b64 = base64.b64encode(pth.read_bytes()).decode()
+            hero_html = (
+                f'<div class="image-card" style="grid-column: 1 / -1;">'
+                f'<img src="data:image/png;base64,{b64}" '
+                f'alt="{html.escape(label)}" style="max-width:100%;">'
+                f'<div class="image-label">{html.escape(label)}</div></div>')
+        else:
+            images_html += _img_card(pth, label)
+
+    links_html = ""
+    for label, f in (interactive or {}).items():
+        pth = Path(f) if Path(f).is_absolute() else wd / f
+        if pth.exists():
+            links_html += (f'<p>&#127919; <a href="{html.escape(pth.name)}" '
+                           f'target="_blank">Open 3D visualization: '
+                           f'{html.escape(label)}</a></p>')
 
     badge = ('<span class="quality-badge quality-good">GATE PASSED</span>'
              if gate.get("passed") else
@@ -130,7 +150,8 @@ def build_html_report(workdir: str, objective: str, metadata: dict,
 {claims_html}
 
 <h2>4. Images</h2>
-<div class="image-grid">{images_html or '<p>(none)</p>'}</div>
+<div class="image-grid">{hero_html}{images_html or ('' if hero_html else '<p>(none)</p>')}</div>
+{links_html}
 
 <h2>5. Planning Decisions &amp; Evidence</h2>
 <div class="decision-box">{html.escape(decisions_text or '(see commit script in session/)')}</div>

@@ -156,8 +156,19 @@ def visualize_defects_3d(atoms, types: np.ndarray, out_prefix: str,
         p, t = p[sel], t[sel]
     colors = {2: "#b51d14", 3: "#ddb310", 0: "#777777", 1: "#4053d3",
               4: "#7f2ccb", 5: "#00b25d"}
+    # boundary-hugging clusters are SURFACE-UNCLASSIFIABLE atoms (finite-
+    # specimen artifact), not defects - title figures accordingly
+    ext_lo, ext_hi = atoms.get_positions().min(0), atoms.get_positions().max(0)
+    near_edge = np.zeros(len(p), bool)
+    for k in range(3):
+        near_edge |= (p[:, k] < ext_lo[k] + 6.0) | (p[:, k] > ext_hi[k] - 6.0)
+    surf_frac = float(near_edge.mean()) if len(p) else 0.0
+    fig_title = ("surface-unclassifiable atoms (finite-specimen artifact)"
+                 if surf_frac > 0.8 else "non-host atoms (potential defects)")
     out = {"n_defect_atoms_shown": int(len(p)),
-           "host_hidden": _TYPE_NAMES.get(host)}
+           "host_hidden": _TYPE_NAMES.get(host),
+           "surface_fraction_of_shown": round(surf_frac, 3),
+           "figure_title": fig_title}
 
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     for ax, (i, j, lab) in zip(axes, [(0, 1, "xy"), (0, 2, "xz"), (1, 2, "yz")]):
@@ -167,7 +178,7 @@ def visualize_defects_3d(atoms, types: np.ndarray, out_prefix: str,
                        c=colors.get(int(tv), "#333333"),
                        label=_TYPE_NAMES.get(int(tv)))
         ax.set_aspect(1)
-        ax.set_title(f"defect atoms - {lab}")
+        ax.set_title(f"{fig_title} - {lab}", fontsize=9)
         ax.legend(markerscale=4, fontsize=8)
     png = wd / f"{out_prefix}_defects3d.png"
     fig.savefig(png, dpi=200, bbox_inches="tight")
@@ -185,7 +196,7 @@ def visualize_defects_3d(atoms, types: np.ndarray, out_prefix: str,
                 marker=dict(size=2, color=colors.get(int(tv), "#333333"))))
         figp = go.Figure(traces)
         figp.update_layout(scene_aspectmode="data",
-                           title=f"defect atoms (host {out['host_hidden']} hidden)")
+                           title=f"{fig_title} (host {out['host_hidden']} hidden)")
         html = wd / f"{out_prefix}_defects3d.html"
         figp.write_html(html, include_plotlyjs=True)
         out["html"] = html.name

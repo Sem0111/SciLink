@@ -33,6 +33,10 @@ imaging step. Four stages, each a TOOL_SPEC function in `ptm3d_tools.py`:
   surfaces as HCP/OTHER sheets. A planar cluster whose centroid sits at a
   cell face (position ~ min or max of the cell along the sheet normal) is a
   SURFACE. Only interior clusters are defects.
+- REPORTING LANGUAGE: surface clusters are "surface-unclassifiable atoms
+  (finite-specimen artifact)" - never "defects" or "other phases"; a
+  92%-BCC single-phase tip with a 7% surface skin IS single-phase. Reserve
+  "defect" for interior clusters, and say so in claims and figure titles.
 - Interpretation of interior clusters in an FCC host: one planar HCP sheet
   = coherent twin boundary (sigma-3); two adjacent HCP sheets = intrinsic
   stacking fault; HCP-FCC-HCP sandwich = extrinsic fault; non-planar

@@ -254,9 +254,15 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                 n_struct = int(result.get("n_columns_structure", 0))
                 checks["n_columns_image"] = n_img
                 checks["n_columns_structure"] = n_struct
-                ratio = n_img / max(n_struct, 1)
-                checks["column_count_ratio"] = round(ratio, 2)
-                checks["column_count_consistent"] = bool(0.4 <= ratio <= 2.5)
+                if n_struct == 0:
+                    # cross-check UNAVAILABLE (no structure-side count) is
+                    # not the same verdict as INCONSISTENT
+                    checks["column_crosscheck"] = "unavailable"
+                else:
+                    ratio = n_img / n_struct
+                    checks["column_count_ratio"] = round(ratio, 2)
+                    checks["column_count_consistent"] = bool(
+                        0.4 <= ratio <= 2.5)
         except Exception as exc:  # noqa: BLE001 - gate must always report
             checks["gate_error"] = f"{type(exc).__name__}: {exc}"
         checks["passed"] = all(v is True for k, v in checks.items()
@@ -352,15 +358,31 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
 
             images = {}
             files = result.get("files") or {}
+            # hero first: an explicit hero_png, else an elements/overview
+            # render, else the simulated image
+            all_pngs = sorted(workdir.rglob("*.png"))
+            hero = files.get("hero_png")
+            if not hero:
+                for cand in all_pngs:
+                    if "element" in cand.name or "overview" in cand.name:
+                        hero = str(cand)
+                        break
+            if hero:
+                images["Reconstruction overview"] = hero
             if files.get("png"):
-                images["Simulated HAADF-STEM"] = files["png"]
-            for extra in sorted(workdir.rglob("*.png"))[:8]:
-                if str(extra.name) != str(files.get("png", "")):
+                images.setdefault("Simulated HAADF-STEM", files["png"])
+            for extra in all_pngs[:10]:
+                if str(extra) not in images.values() and \
+                        str(extra.name) not in images.values():
                     images.setdefault(extra.stem.replace("_", " "),
                                       str(extra))
+            interactive = {p.stem.replace("_", " "): str(p)
+                           for p in sorted(workdir.rglob("*.html"))
+                           if p.name != "report.html"}
             report = build_html_report(
                 str(workdir), objective, metadata, scout, result, gate,
-                interpretation, decisions_text=decisions, images=images)
+                interpretation, decisions_text=decisions, images=images,
+                interactive=interactive)
 
             status = "success" if gate.get("passed") else "partial"
             out = {"status": status,

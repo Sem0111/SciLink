@@ -44,6 +44,23 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   simulated results are upper bounds on detectability, which is exactly the
   sim2exp question the skill can answer by degrading the simulated cloud.
 
+### visualization and reporting (APT convention)
+- FIRST figure of any APT report: `visualize_apt_elements` - element-colored
+  atom maps, apex at the TOP, one panel per element plus the combined
+  overlay. Label it `hero_png` in your files dict so the report renders it
+  large; every other figure is subordinate.
+- THEN the CCD community map (auto-rendered by detect_segregation) - its
+  legend must carry MEANINGS (annotate_communities), never bare community
+  numbers.
+- Interactive 3D htmls (elements and communities) are produced alongside;
+  the report links them as "open 3D visualization".
+- Composition reporting: ALWAYS via composition_from_labels (decomposes
+  molecular ions, excludes placeholder labels like 27Da) - never tally raw
+  ion labels; a naive tally can report absurd compositions.
+- Probing scale: 1 nm neighborhoods miss sub-nm segregation; if a targeted
+  species shows no community at 1 nm, rerun at 0.5-0.75 nm before calling
+  a negative.
+
 ## validation
 
 - Mean neighborhood density should match the material (~60/nm^3 for BCC

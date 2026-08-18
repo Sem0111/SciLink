@@ -306,7 +306,8 @@ def msm_parameter_sweep(pos_path: str, rrng_path: str, species,
     # plateau lives at smaller d. Re-sweep the lower half of the window;
     # the stage-1 result is kept under "stage1" for the record.
     if (not _refined
-            and max(null_sizes) > max(10 * n_min, 0.02 * len(xt))):
+            and (max(null_sizes) > 10 * n_min
+                 or max(null_sizes) > 0.02 * len(xt))):
         res["percolation_refinement"] = (
             f"largest null cluster {max(null_sizes)} >> N_min floor "
             f"{n_min} - percolation at d={d_rec:.2f} nm; re-swept "

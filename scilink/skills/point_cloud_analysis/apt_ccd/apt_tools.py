@@ -381,9 +381,16 @@ def _load_ranged_positions(pos_path, rrng_path, max_points=250000):
     (z_plot = z_max - z). Species stay as ranged ion labels - NO
     decomposition or element grouping."""
     import apav
-    if str(pos_path).lower().endswith(".apt"):
+    p = str(pos_path).lower()
+    if p.endswith(".apt"):
         roi = apav.load_apt(str(pos_path))
         xyz, mass = roi.xyz, roi.mass
+    elif p.endswith(".pos"):
+        # native read (big-endian f4 x,y,z,Da records) - apav's pos
+        # reader still uses the numpy-1 newbyteorder API
+        arr = np.fromfile(str(pos_path), dtype=">f4").reshape(-1, 4)
+        xyz = arr[:, :3].astype(np.float64)
+        mass = arr[:, 3].astype(np.float64)
     else:
         arr = np.loadtxt(pos_path, delimiter=",")
         xyz, mass = arr[:, :3], arr[:, 3]

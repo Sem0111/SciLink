@@ -74,6 +74,20 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   finds localized zones invisible to clustering. Verified live: a 53%%-
   local-fraction oxide pocket in a PWR steel that CCD missed entirely.
 
+### noise-partitioning on homogeneous data (hard-won rule)
+- On a compositionally HOMOGENEOUS cloud, the community machinery still
+  partitions counting-statistics fluctuations into plausible-looking
+  per-element communities with large KS signatures (~45-ion 1-nm
+  neighborhoods fluctuate by sigma ~ 8-9%% per species - plenty for a
+  clusterer to carve). Verified on the published annealed-CoCrNi
+  benchmark: the AUTHORS' random dataset (same positions, scrambled
+  labels, zero chemistry) yielded 4 communities with KS +0.42..+0.52 -
+  equal to or LARGER than the real data's. Therefore a CCD community
+  structure is NOT evidence of segregation by itself: ALWAYS rerun
+  detection on a label-shuffle (or provided random) control and claim
+  only structure ABSENT from the control; spatially contiguous domains
+  (vs salt-and-pepper) are the corroborating signature.
+
 ## validation
 
 - Mean neighborhood density should match the material (~60/nm^3 for BCC

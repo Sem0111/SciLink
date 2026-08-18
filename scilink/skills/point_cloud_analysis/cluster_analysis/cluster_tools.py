@@ -1108,7 +1108,7 @@ def family1_report(workdir: str, run: dict,
                      "<th>solute seeded</th><th>expected detected</th>"
                      "</tr>" + rows + "</table>")
     if control:
-        s.append("<h2>False-positive control (cluster-free twin)</h2>")
+        s.append(f"<h2>{_esc(control.get('title', 'False-positive control (cluster-free twin)'))}</h2>")
         s.append(kv_table(control.get("summary", {}),
                           ["n_false_positive_clusters",
                            "pipeline_stopped_at",

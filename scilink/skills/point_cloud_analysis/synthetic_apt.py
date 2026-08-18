@@ -90,6 +90,79 @@ def seed_clusters(pos: np.ndarray, species: np.ndarray, rng,
     return truth
 
 
+def seed_precipitates(pos: np.ndarray, species: np.ndarray, rng,
+                      n_ppt: int = 20, radius_A: tuple = (15.0, 40.0),
+                      composition: dict | None = None,
+                      margin_A: float = 45.0) -> list:
+    """Seed SHARP-INTERFACE spherical precipitates: every atom inside a
+    sphere is reassigned by drawing from ``composition`` (a second phase,
+    unlike seed_clusters' partial enrichment). Returns ground truth
+    [{center_A, radius_A, composition, n_atoms}] for family-2 scoring."""
+    from scipy.spatial import cKDTree
+
+    composition = composition or {"Ti": 0.20, "Y": 0.15, "O": 0.35,
+                                  "Fe": 0.30}
+    syms = list(composition)
+    probs = np.array([composition[s] for s in syms], dtype=float)
+    probs /= probs.sum()
+    lo = pos.min(axis=0) + margin_A
+    hi = pos.max(axis=0) - margin_A
+    tree = cKDTree(pos)
+    truth, centers = [], []
+    for _ in range(n_ppt * 4):
+        if len(truth) >= n_ppt:
+            break
+        c = lo + rng.random(3) * (hi - lo)
+        r = rng.uniform(*radius_A)
+        # reject overlaps so per-precipitate truth stays unambiguous
+        if any(np.linalg.norm(c - c2) < r + r2 + 10
+               for c2, r2 in centers):
+            continue
+        idx = np.array(tree.query_ball_point(c, r), dtype=int)
+        if len(idx) < 50:
+            continue
+        species[idx] = rng.choice(syms, size=len(idx), p=probs)
+        centers.append((c, r))
+        truth.append({"center_A": [round(float(v), 2) for v in c],
+                      "radius_A": round(float(r), 2),
+                      "composition": composition,
+                      "n_atoms": int(len(idx))})
+    return truth
+
+
+def make_precipitate_benchmark(out_dir: str, name: str = "synth_ppt",
+                               seed: int = 11, structure: str = "bcc",
+                               a: float = 2.87, size_nm=(40., 40., 80.),
+                               matrix: str = "Fe",
+                               solutes: dict | None = None,
+                               n_ppt: int = 20,
+                               composition: dict | None = None,
+                               efficiency: float = DEFAULT_EFFICIENCY,
+                               sigma_lateral_A: float = DEFAULT_SIGMA_LATERAL_A,
+                               sigma_depth_A: float = DEFAULT_SIGMA_DEPTH_A) -> dict:
+    """One-call family-2 benchmark: Fe-Cr matrix with sharp-interface
+    Ti-Y-O precipitates of KNOWN size/composition, APT-degraded."""
+    rng = np.random.default_rng(seed)
+    solutes = solutes if solutes is not None else {"Cr": 0.10}
+    pos = build_lattice(structure, a, size_nm)
+    species = seed_solid_solution(len(pos), matrix, solutes, rng)
+    ppts = seed_precipitates(pos, species, rng, n_ppt=n_ppt,
+                             composition=composition)
+    box = np.prod([v * 10.0 for v in size_nm])
+    vf = sum(4/3 * np.pi * p["radius_A"]**3 for p in ppts) / box
+    p, s = apt_degrade(pos, species, rng, efficiency, sigma_lateral_A,
+                       sigma_depth_A)
+    return write_apt_dataset(p, s, out_dir, name, {
+        "kind": "precipitate_benchmark", "seed": seed,
+        "structure": structure, "lattice_a_A": a,
+        "matrix": matrix, "solutes_nominal": solutes,
+        "precipitates": ppts, "n_precipitates_seeded": len(ppts),
+        "volume_fraction_true": round(float(vf), 5),
+        "degradation": {"efficiency": efficiency,
+                        "sigma_lateral_A": sigma_lateral_A,
+                        "sigma_depth_A": sigma_depth_A}})
+
+
 def seed_planar_segregation(pos: np.ndarray, species: np.ndarray, rng,
                             plane_z_A: float, width_A: float = 6.0,
                             solute: str = "Ni",

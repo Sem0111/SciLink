@@ -38,7 +38,8 @@ from .report import build_html_report
 
 # Skill bundles whose TOOL_SPECS this agent serves (registry-gated by name).
 DEFAULT_ACTIVE_SKILLS = ["haadf_workflow", "generate_abtem_input",
-                         "structure_id_3d", "apt_ccd", "cluster_analysis"]
+                         "structure_id_3d", "apt_ccd", "cluster_analysis",
+                         "precipitate_analysis"]
 
 _BUDGET_NOTES = """\
 GPU memory budget (24 GB class card, empirical): a lateral field up to

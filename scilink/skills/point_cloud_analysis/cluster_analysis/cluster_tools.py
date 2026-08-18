@@ -764,6 +764,202 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
     return _jsonable(res)
 
 
+def _esc(s):
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;"))
+
+
+def _report_css():
+    return """
+body { font-family: -apple-system, 'Segoe UI', Helvetica, Arial,
+       sans-serif; margin: 0 auto; max-width: 1080px; padding: 24px;
+       color: #1a1a2e; background: #fafafa; }
+h1 { font-size: 1.5em; border-bottom: 3px solid #4053d3;
+     padding-bottom: 8px; }
+h2 { font-size: 1.15em; margin-top: 1.8em; color: #16213e; }
+img { max-width: 100%; border: 1px solid #ddd; background: #fff;
+      margin: 6px 0; }
+table { border-collapse: collapse; margin: 8px 0; font-size: 0.88em; }
+th, td { border: 1px solid #ccc; padding: 4px 9px; text-align: left; }
+th { background: #eef0fa; }
+.pass { color: #00752d; font-weight: 600; }
+.fail { color: #b51d14; font-weight: 600; }
+.note { background: #fff8e1; border-left: 4px solid #ddb310;
+        padding: 8px 12px; margin: 10px 0; }
+.links a { margin-right: 18px; }
+footer { margin-top: 2.5em; font-size: 0.8em; color: #666;
+         border-top: 1px solid #ddd; padding-top: 8px; }
+"""
+
+
+def family1_report(workdir: str, run: dict,
+                   title: str = "Family-1 cluster analysis",
+                   hero: dict | None = None, score: dict | None = None,
+                   control: dict | None = None, extra_note: str = "",
+                   out_name: str = "report.html") -> dict:
+    """Assemble the standard family-1 HTML report from pipeline results -
+    the PIPELINE-DEFAULT report stage (plan rule: report artifacts are
+    guaranteed, never optional). Call it at the end of EVERY run.
+
+    ``run`` holds the tool results under keys knee / sweep / detect /
+    gate / rdf / zsdm (any subset); ``hero`` a visualize_apt_elements
+    result; ``score`` a benchmark scoring dict; ``control`` a
+    false-positive-control section. Figures are linked RELATIVE to
+    workdir so the report travels with its run folder.
+    """
+    import os
+
+    wd = Path(workdir)
+    wd.mkdir(parents=True, exist_ok=True)
+
+    def rel(p):
+        return _esc(os.path.relpath(str(p), str(wd))) if p else None
+
+    def img(p):
+        return f'<img src="{rel(p)}">' if p else ""
+
+    def kv_table(d, keys):
+        rows = "".join(f"<tr><th>{_esc(k)}</th><td>{_esc(d[k])}</td></tr>"
+                       for k in keys if k in d and d[k] is not None)
+        return f"<table>{rows}</table>" if rows else ""
+
+    def badge(ok, yes, no):
+        return (f'<span class="pass">{yes}</span>' if ok
+                else f'<span class="fail">{no}</span>')
+
+    s = [f"<title>{_esc(title)}</title><style>{_report_css()}</style>",
+         f"<h1>{_esc(title)}</h1>"]
+    if extra_note:
+        s.append(f'<div class="note">{extra_note}</div>')
+
+    if hero:
+        s.append("<h2>Reconstruction - ion species (hero)</h2>")
+        s.append(img(hero.get("png")))
+        if hero.get("html"):
+            s.append(f'<p class="links"><a href="{rel(hero["html"])}">'
+                     "interactive 3D ion map</a></p>")
+    knee = run.get("knee") or {}
+    if knee:
+        s.append("<h2>Method-selection evidence: k-NN knee vs "
+                 "label-shuffle null</h2>")
+        s.append(kv_table(knee, ["species", "k", "n_target_ions",
+                                 "bimodal_signal", "cluster_mode_nm",
+                                 "valley_nm", "null_mode_nm",
+                                 "dmax_window_nm", "note"]))
+        s.append(img(knee.get("png")))
+    sweep = run.get("sweep") or {}
+    if sweep and "error" not in sweep:
+        s.append("<h2>MSM parameter sweep (stability plateau, "
+                 "null-informed N_min)</h2>")
+        s.append(kv_table(sweep, ["plateau_found", "plateau_range_nm",
+                                  "n_clusters_at_plateau",
+                                  "d_max_recommended_nm",
+                                  "largest_null_cluster",
+                                  "n_min_recommended",
+                                  "percolation_warning", "note"]))
+        s.append(img(sweep.get("png")))
+    elif sweep:
+        s.append("<h2>MSM parameter sweep</h2>"
+                 f'<div class="note">{_esc(sweep["error"])}</div>')
+    det = run.get("detect") or {}
+    if det:
+        s.append("<h2>MSM detection</h2>")
+        s.append(kv_table(det, ["species", "d_max_nm", "n_min",
+                                "envelope_nm", "erosion_nm", "n_clusters",
+                                "analyzed_volume_nm3",
+                                "number_density_per_m3",
+                                "clustered_target_fraction"]))
+        s.append(img(det.get("png")))
+        if det.get("html"):
+            s.append(f'<p class="links"><a href="{rel(det["html"])}">'
+                     "interactive 3D cluster map</a></p>")
+        cl = det.get("clusters") or []
+        if cl:
+            rows = "".join(
+                f"<tr><td>{c['id']}</td><td>{c['n_ions']}</td>"
+                f"<td>{c['n_target_ions']}</td>"
+                f"<td>{c['center_nm']}</td>"
+                f"<td>{c['guinier_radius_nm']}</td>"
+                f"<td>{c['target_fraction']}</td>"
+                f"<td>{_esc(', '.join(f'{k} {v:.2f}' for k, v in list(c['composition_ionic'].items())[:4]))}</td></tr>"
+                for c in cl[:40])
+            s.append("<table><tr><th>id</th><th>ions</th><th>target ions"
+                     "</th><th>center [nm]</th><th>Guinier r [nm]</th>"
+                     "<th>target frac</th><th>top ionic composition"
+                     "</th></tr>" + rows + "</table>")
+            if len(cl) > 40:
+                s.append(f"<p>... {len(cl) - 40} more clusters "
+                         "(see json)</p>")
+        if det.get("matrix_composition_ionic_pct"):
+            mc = det["matrix_composition_ionic_pct"]
+            s.append("<p><b>Matrix ionic composition [at.%]:</b> "
+                     + _esc(", ".join(f"{k} {v}" for k, v in
+                                      list(mc.items())[:10])) + "</p>")
+    gate = run.get("gate") or {}
+    if gate:
+        s.append("<h2>Accept gate: label-shuffle null</h2>")
+        s.append(kv_table(gate, ["n_observed", "n_null", "n_null_mean",
+                                 "n_null_std", "z_score",
+                                 "null_contrast"]))
+        s.append("<p>Verdict: " + badge(gate.get("null_gate_passed"),
+                 "PASSED - detection collapses under label shuffling",
+                 "NOT PASSED - no defensible cluster claim") + "</p>")
+    rdf = run.get("rdf") or {}
+    if rdf:
+        s.append("<h2>RDF vs label-shuffle null (model-free "
+                 "corroboration)</h2>")
+        s.append(kv_table(rdf, ["peak_ratio", "peak_r_nm",
+                                "significant_excess", "excess_range_nm",
+                                "excess_persists_to_r_max"]))
+        s.append(img(rdf.get("png")))
+    zs = run.get("zsdm") or {}
+    if zs:
+        s.append("<h2>z-SDM crystallographic-signal gate</h2>")
+        s.append(kv_table(zs, ["species_a", "species_b", "n_pairs",
+                               "fft_peak_contrast", "plane_spacing_A"]))
+        s.append("<p>" + badge(zs.get("crystallographic_signal"),
+                 _esc(zs.get("gate_verdict", "")),
+                 _esc(zs.get("gate_verdict", ""))) + "</p>")
+        s.append(img(zs.get("png")))
+    if score:
+        s.append("<h2>Benchmark score (truth opened AFTER the blind "
+                 "run)</h2>")
+        s.append(kv_table(score, ["n_truth", "n_detected", "n_matched",
+                                  "recall", "precision", "size_pearson_r",
+                                  "size_ratio_mean",
+                                  "solute_count_ratio_mean",
+                                  "target_fraction_mean",
+                                  "target_fraction_truth"]))
+        missed = score.get("missed_truth") or []
+        if missed:
+            rows = "".join(
+                f"<tr><td>{m['idx']}</td><td>{m['radius_A']}</td>"
+                f"<td>{m['n_solute_after']}</td>"
+                f"<td>{m['expected_detected']}</td></tr>" for m in missed)
+            s.append("<p><b>Missed truth clusters</b> (expected detected "
+                     "solute count vs the null-demanded N_min):</p>"
+                     "<table><tr><th>truth idx</th><th>radius [A]</th>"
+                     "<th>solute seeded</th><th>expected detected</th>"
+                     "</tr>" + rows + "</table>")
+    if control:
+        s.append("<h2>False-positive control (cluster-free twin)</h2>")
+        s.append(kv_table(control.get("summary", {}),
+                          ["n_false_positive_clusters",
+                           "pipeline_stopped_at",
+                           "gate_passed_on_control"]))
+        ck = (control.get("knee") or {})
+        if ck.get("png"):
+            s.append(img(ck["png"]))
+    s.append("<footer>Generated by cluster_tools.family1_report "
+             "(scilink point_cloud_analysis / cluster_analysis). "
+             "Policies: ionic composition (no molecular-ion "
+             "decomposition), apex-up views. Every claim above is gated "
+             "by its deterministic null model.</footer>")
+    out = wd / out_name
+    out.write_text("\n".join(s))
+    return {"html": str(out)}
+
+
 _IMP = ("from scilink.skills.point_cloud_analysis.cluster_analysis."
         "cluster_tools import ")
 
@@ -960,5 +1156,30 @@ TOOL_SPECS = [
         returns=("crystallographic_signal, fft_peak_contrast, "
                  "plane_spacing_A, gate_verdict, png"),
         example=("g = zsdm('tip.csv', 't.rrng', 'Fe', workdir='out')"),
+    ),
+    ToolSpec(
+        name="family1_report",
+        description=("Assemble the standard family-1 HTML report (hero, "
+                     "knee/sweep evidence, cluster table + 3D link, null "
+                     "gates, optional benchmark score) from pipeline "
+                     "results. Report artifacts are PIPELINE-DEFAULT - "
+                     "every family-1 run must end with this call."),
+        parameters={"workdir": {"type": "string",
+                                "description": "run folder (figures live "
+                                               "here; links are relative)"},
+                    "run": {"type": "object",
+                            "description": "results under keys knee/sweep/"
+                                           "detect/gate/rdf/zsdm"}},
+        required=["workdir", "run"],
+        import_line=_IMP + "family1_report",
+        signature=("family1_report(workdir, run, title=..., hero=None, "
+                   "score=None, control=None, extra_note='', "
+                   "out_name='report.html') -> dict"),
+        agents=["simulation"],
+        when_to_use=("ALWAYS, as the last step of any family-1 analysis - "
+                     "pass the visualize_apt_elements result as hero."),
+        returns="html (report path)",
+        example=("rep = family1_report('out', {'knee': knee, 'sweep': sw, "
+                 "'detect': det, 'gate': gate}, hero=viz)"),
     ),
 ]

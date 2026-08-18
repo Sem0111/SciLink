@@ -64,6 +64,16 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   species shows no community at 1 nm, rerun at 0.5-0.75 nm before calling
   a negative.
 
+### rare-species blindness (hard-won rule)
+- CCD composition clustering CANNOT detect minority chemistries whose
+  per-neighborhood counts sit below matrix counting noise (in practice:
+  species groups under ~1-2% of ions, worse when fragmented across many
+  molecular-ion labels). For any objective targeting oxides, carbides, or
+  impurity enrichment, ALWAYS run map_species_zone alongside CCD - it maps
+  a species GROUP directly (aggregating whole ions, never decomposing) and
+  finds localized zones invisible to clustering. Verified live: a 53%%-
+  local-fraction oxide pocket in a PWR steel that CCD missed entirely.
+
 ## validation
 
 - Mean neighborhood density should match the material (~60/nm^3 for BCC

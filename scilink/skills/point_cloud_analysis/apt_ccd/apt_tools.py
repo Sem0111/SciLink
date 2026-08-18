@@ -488,9 +488,150 @@ def annotate_communities(community_compositions: dict,
     return names
 
 
+def resolve_species_group(labels, include_regex: str) -> list:
+    """Ion labels matching a regex - e.g. r"O(?![a-z])" selects every
+    O-bearing species (CrO, FeO2, H2O, O, O2 ...) without decomposing any
+    of them. Grouping aggregates whole ions; it is NOT decomposition."""
+    import re as _re
+    pat = _re.compile(include_regex)
+    return sorted({str(l) for l in labels if l and pat.search(str(l))})
+
+
+def map_species_zone(pos_path: str, rrng_path: str,
+                     group_regex: str, group_name: str,
+                     out_prefix: str, workdir: str = ".",
+                     voxel_nm: float = 1.0, smooth_vox: float = 1.5,
+                     min_ions_per_voxel: int = 20) -> dict:
+    """Direct concentration mapping of a rare species GROUP - the right
+    tool when composition clustering is blind to it (fractions well below
+    counting noise of the matrix species).
+
+    Computes a 3D fraction grid (group ions / all ranged ions per voxel,
+    smoothed), a depth profile (apex-up), a mid-slice map, an interactive
+    3D isosurface html at an automatically chosen enrichment threshold,
+    and zone statistics (baseline vs enriched-zone fraction, zone extent).
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    from scipy.ndimage import gaussian_filter
+
+    wd = Path(workdir)
+    wd.mkdir(parents=True, exist_ok=True)
+    xyz, labels = _load_ranged_positions(pos_path, rrng_path,
+                                         max_points=10**9)
+    members = resolve_species_group(np.unique(labels), group_regex)
+    gmask = np.isin(labels, members)
+    n_g, n_all = int(gmask.sum()), len(labels)
+
+    lo, hi = xyz.min(axis=0), xyz.max(axis=0)
+    bins = [max(4, int((hi[i] - lo[i]) / voxel_nm)) for i in range(3)]
+    H_all, edges = np.histogramdd(xyz, bins=bins,
+                                  range=list(zip(lo, hi)))
+    H_g, _ = np.histogramdd(xyz[gmask], bins=bins,
+                            range=list(zip(lo, hi)))
+    H_all_s = gaussian_filter(H_all, smooth_vox)
+    H_g_s = gaussian_filter(H_g, smooth_vox)
+    frac = np.where(H_all_s >= min_ions_per_voxel,
+                    H_g_s / np.maximum(H_all_s, 1e-9), np.nan)
+
+    valid = frac[np.isfinite(frac)]
+    baseline = float(np.nanmedian(valid))
+    thr = max(3 * baseline, baseline + 3 * np.nanstd(valid))
+    zone = frac > thr
+    zone_frac_of_volume = float(np.nansum(zone) / np.isfinite(frac).sum())
+
+    # depth profile (axis 2 of the apex-up frame)
+    with np.errstate(invalid="ignore"):
+        prof = np.nanmean(frac, axis=(0, 1))
+    zc = 0.5 * (edges[2][:-1] + edges[2][1:])
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 5))
+    ax1.plot(prof * 100, zc, "-o", ms=3)
+    ax1.axvline(baseline * 100, color="gray", ls="--", label="baseline")
+    ax1.axvline(thr * 100, color="red", ls="--", label="zone threshold")
+    ax1.invert_yaxis()
+    ax1.set_xlabel(f"{group_name} ion fraction [%]")
+    ax1.set_ylabel("distance below apex [nm]")
+    ax1.legend(fontsize=8)
+    ax1.set_title(f"{group_name} depth profile")
+    mid = frac[:, frac.shape[1] // 2, :]
+    im = ax2.imshow(mid.T, origin="lower", aspect="equal", cmap="inferno",
+                    extent=[edges[0][0], edges[0][-1],
+                            edges[2][0], edges[2][-1]])
+    ax2.invert_yaxis()
+    ax2.set_title(f"{group_name} fraction - x-z mid-slice")
+    plt.colorbar(im, ax=ax2, shrink=0.8)
+    png = wd / f"{out_prefix}_{group_name}_zone.png"
+    fig.savefig(png, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    out = {"group_name": group_name, "group_members": members,
+           "n_group_ions": n_g,
+           "group_fraction_overall_pct": round(n_g / n_all * 100, 3),
+           "baseline_fraction_pct": round(baseline * 100, 3),
+           "zone_threshold_pct": round(thr * 100, 3),
+           "zone_volume_fraction": round(zone_frac_of_volume, 4),
+           "zone_max_fraction_pct": round(float(np.nanmax(valid)) * 100, 2),
+           "png": str(png)}
+    try:
+        import plotly.graph_objects as go
+        xc = 0.5 * (edges[0][:-1] + edges[0][1:])
+        yc = 0.5 * (edges[1][:-1] + edges[1][1:])
+        X, Y, Z = np.meshgrid(xc, yc, zc, indexing="ij")
+        f = np.nan_to_num(frac, nan=0.0)
+        figp = go.Figure(go.Isosurface(
+            x=X.ravel(), y=Y.ravel(), z=-Z.ravel(), value=f.ravel(),
+            isomin=thr, isomax=float(np.nanmax(valid)),
+            surface_count=2, opacity=0.5,
+            caps=dict(x_show=False, y_show=False, z_show=False),
+            colorscale="Inferno"))
+        figp.update_layout(scene_aspectmode="data",
+                           title=f"{group_name} enrichment zone "
+                                 f"(iso at {thr*100:.2f}%, apex up)")
+        html = wd / f"{out_prefix}_{group_name}_zone_3d.html"
+        figp.write_html(html, include_plotlyjs=True)
+        out["html"] = str(html)
+    except ImportError:
+        out["html"] = None
+    return out
+
+
 _IMP = "from scilink.skills.point_cloud_analysis.apt_ccd.apt_tools import "
 
 TOOL_SPECS = [
+    ToolSpec(
+        name="map_species_zone",
+        description=("Direct 3D concentration mapping of a RARE ion-species "
+                     "GROUP (e.g. all O-bearing ions) - the right tool when "
+                     "composition clustering (CCD) is blind to a species "
+                     "far below matrix counting noise. Grouping aggregates "
+                     "whole ions (never decomposes). Produces depth profile "
+                     "+ slice map + 3D isosurface + zone statistics."),
+        parameters={"pos_path": {"type": "string",
+                                 "description": ".apt/.pos or x,y,z,Da csv"},
+                    "rrng_path": {"type": "string", "description": ".rrng"},
+                    "group_regex": {"type": "string",
+                                    "description": "regex over ion labels, "
+                                                   "e.g. 'O(?![a-z])' for "
+                                                   "O-bearing species"},
+                    "group_name": {"type": "string",
+                                   "description": "display name, e.g. "
+                                                  "'oxide'"}},
+        required=["pos_path", "rrng_path", "group_regex", "group_name"],
+        import_line=_IMP + "map_species_zone",
+        signature=("map_species_zone(pos_path, rrng_path, group_regex, "
+                   "group_name, out_prefix, workdir='.', voxel_nm=1.0) "
+                   "-> dict"),
+        agents=["simulation"],
+        when_to_use=("Whenever the objective targets a minority chemistry "
+                     "(oxides, carbides, impurity enrichment) - run this "
+                     "ALONGSIDE CCD; CCD alone will miss species below "
+                     "~1-2%% of ions."),
+        returns=("group stats, baseline vs zone fractions, zone volume "
+                 "fraction, profile/slice png, isosurface html"),
+        example=("zone = map_species_zone('R31.apt', 'r.rrng', "
+                 "r'O(?![a-z])', 'oxide', 'tip', workdir='out')"),
+    ),
     ToolSpec(
         name="visualize_apt_elements",
         description=("Ion-species atom maps of an APT reconstruction - the "

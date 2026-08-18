@@ -217,7 +217,7 @@ def msm_parameter_sweep(pos_path: str, rrng_path: str, species,
                         n_min: int = 10, d_max_window_nm=None,
                         n_steps: int = 16, n_shuffles: int = 3,
                         out_prefix: str = "msm_sweep",
-                        workdir: str = ".") -> dict:
+                        workdir: str = ".", _refined: bool = False) -> dict:
     """MSM d_max sweep with stability-plateau detection and null-informed
     N_min - the BLIND parameter-selection tool (claims come from the
     plateau, never a cherry-picked point).
@@ -300,6 +300,28 @@ def msm_parameter_sweep(pos_path: str, rrng_path: str, species,
         res["percolation_warning"] = (
             "largest null cluster spans >5% of target ions at the "
             "recommended d_max - the matrix percolates; shrink d_max")
+    # AUTO-REFINEMENT (one level): a null-informed N_min far above the
+    # sweep floor means the random matrix percolates at the recommended
+    # d_max (high-solute-density materials, e.g. ODS alloys) - the true
+    # plateau lives at smaller d. Re-sweep the lower half of the window;
+    # the stage-1 result is kept under "stage1" for the record.
+    if (not _refined
+            and max(null_sizes) > max(10 * n_min, 0.02 * len(xt))):
+        res["percolation_refinement"] = (
+            f"largest null cluster {max(null_sizes)} >> N_min floor "
+            f"{n_min} - percolation at d={d_rec:.2f} nm; re-swept "
+            f"[{lo:.3f}, {lo + 0.5 * (hi - lo):.3f}] nm")
+        refined = msm_parameter_sweep(
+            pos_path, rrng_path, species, n_min=n_min,
+            d_max_window_nm=[lo, lo + 0.5 * (hi - lo)],
+            n_steps=n_steps, n_shuffles=n_shuffles,
+            out_prefix=out_prefix + "_refined", workdir=workdir,
+            _refined=True)
+        refined["stage1"] = {k: res.get(k) for k in
+                             ("d_max_recommended_nm", "n_min_recommended",
+                              "largest_null_cluster", "plateau_found",
+                              "percolation_refinement", "png")}
+        return refined
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(grid, n_obs, "-o", ms=4, color=_COLORS[0], label="observed")

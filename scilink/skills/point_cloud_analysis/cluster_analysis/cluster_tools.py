@@ -792,10 +792,107 @@ footer { margin-top: 2.5em; font-size: 0.8em; color: #666;
 """
 
 
+def _strip_for_prompt(obj, drop=("png", "html", "matches")):
+    """Deep-copy a results dict without figure paths / bulky arrays so it
+    fits an interpretation prompt."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in drop:
+                continue
+            if k == "clusters" and isinstance(v, list) and len(v) > 12:
+                out[k] = _strip_for_prompt(v[:12])
+                out["clusters_truncated_note"] = (
+                    f"{len(v) - 12} more clusters omitted from this prompt")
+            else:
+                out[k] = _strip_for_prompt(v)
+        return out
+    if isinstance(obj, list):
+        return [_strip_for_prompt(v) for v in obj]
+    return obj
+
+
+def family1_assessment(run: dict, context: str = "",
+                       score: dict | None = None,
+                       control: dict | None = None,
+                       model: str = "bedrock/us.anthropic.claude-opus-4-8"
+                       ) -> dict:
+    """LLM scientific interpretation of a family-1 run - the detailed
+    text summary for the report. Deterministic gate verdicts are BINDING
+    on the narrative: the prompt forbids claiming anything its null model
+    rejected, and z-SDM's verdict caps site-resolved language.
+
+    Returns {detailed_analysis, scientific_claims, caveats, model} or
+    {error} - report generation must not fail when the LLM is
+    unavailable.
+    """
+    import re as _re
+
+    from scilink.wrappers.litellm_wrapper import LiteLLMGenerativeModel
+
+    payload = {"results": _strip_for_prompt(run)}
+    if score:
+        payload["benchmark_score_vs_ground_truth"] = _strip_for_prompt(score)
+    if control:
+        payload["false_positive_control"] = _strip_for_prompt(control)
+    prompt = (
+        "You are the scientific-interpretation stage of an APT point-cloud "
+        "analysis pipeline. Below are the DETERMINISTIC results of a "
+        "family-1 (clustering / short-range order) analysis: maximum-"
+        "separation cluster detection with blind parameter selection, "
+        "label-shuffle null gates, RDF-vs-null statistics, and a z-SDM "
+        "crystallographic-signal gate.\n\n"
+        "BINDING RULES: (1) gate verdicts are authoritative - never claim "
+        "a signal whose null gate did not pass, and if the z-SDM gate "
+        "reports no lattice-plane signal, no site-resolved ordering "
+        "language is allowed; (2) compositions are IONIC (ranged ion "
+        "species) - do not decompose molecular ions into elements; "
+        "(3) be quantitative - cite the numbers in the results.\n\n"
+        + (f"CONTEXT:\n{context}\n\n" if context else "")
+        + "RESULTS:\n" + json.dumps(payload, indent=1) + "\n\n"
+        "Produce the scientific interpretation as a single fenced ```json "
+        "block with exactly these fields:\n"
+        '{"detailed_analysis": "ONE SINGLE STRING (not a list) of 3-6 '
+        "plain-prose paragraphs (separated by \\n\\n, no markdown) "
+        "interpreting the analysis quantitatively - what was found, how "
+        "the parameters were chosen, what the null models say, what the "
+        'data quality permits", '
+        '"scientific_claims": [2-4 items, each {"claim": one-sentence '
+        'finding, "scientific_impact": why it matters}], '
+        '"caveats": "short plain-prose statement of limitations"}')
+    try:
+        wrapper = LiteLLMGenerativeModel(model)
+        resp = wrapper.generate_content(
+            prompt, generation_config={"max_output_tokens": 4096})
+        part = resp.candidates[0].content.parts[0]
+        raw = getattr(part, "raw_text", None) or getattr(part, "text", "")
+        def _parse(block):
+            # strict -> trailing-comma repair -> first complete object
+            # (models emit almost-JSON: ',}' tails, chatter after the block)
+            try:
+                return json.loads(block)
+            except json.JSONDecodeError:
+                pass
+            repaired = _re.sub(r",\s*([}\]])", r"\1", block)
+            try:
+                return json.loads(repaired)
+            except json.JSONDecodeError:
+                return json.JSONDecoder().raw_decode(repaired)[0]
+
+        m = _re.search(r"```json\s*(\{.*?\})\s*```", raw, _re.DOTALL)
+        out = _parse(m.group(1) if m else raw[raw.find("{"):])
+        out["model"] = model
+        return out
+    except Exception as exc:  # noqa: BLE001 - assessment is best-effort
+        return {"error": f"LLM assessment unavailable: {exc}",
+                "model": model}
+
+
 def family1_report(workdir: str, run: dict,
                    title: str = "Family-1 cluster analysis",
                    hero: dict | None = None, score: dict | None = None,
                    control: dict | None = None, extra_note: str = "",
+                   assessment: dict | None = None,
                    out_name: str = "report.html") -> dict:
     """Assemble the standard family-1 HTML report from pipeline results -
     the PIPELINE-DEFAULT report stage (plan rule: report artifacts are
@@ -831,6 +928,30 @@ def family1_report(workdir: str, run: dict,
          f"<h1>{_esc(title)}</h1>"]
     if extra_note:
         s.append(f'<div class="note">{extra_note}</div>')
+
+    if assessment:
+        s.append("<h2>Scientific assessment</h2>")
+        if assessment.get("error"):
+            s.append(f'<div class="note">{_esc(assessment["error"])}'
+                     "</div>")
+        else:
+            for para in str(assessment.get("detailed_analysis", "")
+                            ).split("\n\n"):
+                if para.strip():
+                    s.append(f"<p>{_esc(para.strip())}</p>")
+            claims = assessment.get("scientific_claims") or []
+            if claims:
+                s.append("<p><b>Claims:</b></p><ol>" + "".join(
+                    f"<li><b>{_esc(c.get('claim', ''))}</b> "
+                    f"{_esc(c.get('scientific_impact', ''))}</li>"
+                    for c in claims) + "</ol>")
+            if assessment.get("caveats"):
+                s.append(f'<div class="note"><b>Caveats:</b> '
+                         f'{_esc(assessment["caveats"])}</div>')
+            s.append(f"<p><i>LLM interpretation "
+                     f"({_esc(assessment.get('model', ''))}); the "
+                     "deterministic gate verdicts below remain "
+                     "authoritative.</i></p>")
 
     if hero:
         s.append("<h2>Reconstruction - ion species (hero)</h2>")

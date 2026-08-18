@@ -5,10 +5,11 @@ detect:
   env_vars: []
   python_modules: [sklearn, scipy]
   guidance: |
-    Implementation lands D2-3 of the APT plan (tools file: cluster_tools.py).
-    ML-CSRO route additionally needs tensorflow + the vendored Yue Li/Gault
-    CoCrNi codebase (Apache-2.0; cite Adv. Mater. 2024 + Nat. Commun. 2023).
-    This md is the SPEC the implementation is written against.
+    Implemented in cluster_tools.py (D2): knn_distance_stats,
+    msm_parameter_sweep, msm_detect, label_shuffle_null, rdf_compare,
+    warren_cowley, zsdm. ML-CSRO route still pending: needs tensorflow +
+    the vendored Yue Li/Gault CoCrNi codebase (Apache-2.0; cite Adv.
+    Mater. 2024 + Nat. Commun. 2023) - week-2 integration item.
 ---
 
 ## overview
@@ -81,7 +82,21 @@ walk in your plan/decisions:
   (results/apt_benchmarks/family1): recall/precision vs the 30 seeded
   clusters, size and composition recovery, false-positive rate on a
   cluster-free synthetic.
-- Real-data regression: the R31 PWR oxide pocket (map_species_zone
-  cross-check) and wtav CSRO answer key (simulated, WC route).
+- SCORED (D2, blind protocol - parameters chosen by knee/plateau/null
+  only, truth opened afterwards): recall 28/30 = 0.93, precision 1.00,
+  size Pearson r = 0.96, composition 0.57 vs seeded 0.50, gate z = 62.
+  Both misses have expected detected solute counts (9.6, 12.6) BELOW the
+  null-demanded N_min = 13 - undetectable at that noise floor, not tool
+  misses. Cluster-free control: knee correctly reports no bimodal signal,
+  pipeline refuses to sweep, zero false positives.
+- Real-data regression PASSED (D2): R31 PWR steel, O-bearing group -
+  MSM localizes the oxide pocket at 150 nm below apex (map_species_zone
+  found it at ~145 nm; independent-method concordance), 21.8k-ion
+  CrO/Ni-rich cluster + 2 smaller, null contrast 15x, z = 6.3; z-SDM
+  contrast 3.1 => site-resolved claims correctly ruled out. wtav CSRO
+  answer key (WC route) still pending.
+- Unit regression: tests/test_cluster_tools.py (11 checks - blind
+  recovery, cluster-free refusal, WC shuffle control + analytic B2
+  alpha = +1, z-SDM gate both verdicts + bcc a/2 spacing).
 - quality_gate (once nativized): metric = null-model contrast
   (observed/null); physical_review: false.

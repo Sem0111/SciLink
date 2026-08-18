@@ -197,6 +197,31 @@ def isosurface_precipitates(pos_path: str, rrng_path: str, species,
                                   * vvol / max(v_valid, 1), 5)})
     res["threshold_sweep"] = sweep
 
+    # label-shuffle null gate on total precipitate VOLUME (not count -
+    # a single genuine large precipitate must still be claimable):
+    # same field/threshold/labeling on random same-size label subsets.
+    rng = np.random.RandomState(13)
+    v_null = []
+    for _ in range(3):
+        idx = rng.choice(len(xyz), int(gmask.sum()), replace=False)
+        m_sh = np.zeros(len(xyz), dtype=bool)
+        m_sh[idx] = True
+        f_sh, _, _, _ = _fraction_field(xyz, m_sh, voxel_nm,
+                                        delocalization_nm,
+                                        min_ions_per_voxel)
+        m_t = np.nan_to_num(f_sh) >= threshold
+        l_t, n_t = ndimage.label(m_t)
+        s_t = ndimage.sum(m_t, l_t, range(1, n_t + 1))
+        v_null.append(float(s_t[s_t >= min_voxels].sum()) * vvol)
+    v_obs = ppt_vox * vvol
+    vm, vs = float(np.mean(v_null)), float(np.std(v_null))
+    res["shuffle_null"] = {
+        "total_volume_obs_nm3": round(v_obs, 1),
+        "total_volume_null_nm3": [round(v, 1) for v in v_null],
+        "volume_contrast": (round(v_obs / vm, 1) if vm > 0 else "inf"),
+        "passed": bool(v_obs > 0
+                       and v_obs > max(3 * vm, vm + 3 * max(vs, 1e-9)))}
+
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5.5),
                                    gridspec_kw={"width_ratios": [1, 1.2]})
     ax1.plot([s["threshold"] for s in sweep], [s["n"] for s in sweep],
@@ -532,8 +557,10 @@ TOOL_SPECS = [
                      "proxigram (pass this tool's volume_fraction) - its "
                      "gates are the accept criteria."),
         returns=("n_precipitates, number_density_per_m3, volume_fraction, "
-                 "per-precipitate morphology, threshold_sweep, png + 3D "
-                 "html"),
+                 "per-precipitate morphology, threshold_sweep, "
+                 "shuffle_null (volume-contrast ACCEPT GATE - no "
+                 "precipitate claim unless shuffle_null.passed), png + "
+                 "3D html"),
         example=("iso = isosurface_precipitates('tip.pos', 't.rrng', "
                  "'Ti|Y|O', g['suggested_threshold'], workdir='out')"),
     ),

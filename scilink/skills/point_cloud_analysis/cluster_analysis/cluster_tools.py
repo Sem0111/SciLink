@@ -722,10 +722,18 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
     phys = (freqs > 1 / 0.6) & (freqs < 1 / 0.05)  # plane spacings 0.5-6 A
     peak_contrast = 0.0
     spacing_A = None
-    if phys.any() and np.median(power[phys]) > 0:
-        ip = np.argmax(np.where(phys, power, 0))
-        peak_contrast = float(power[ip] / np.median(power[phys]))
-        spacing_A = round(10.0 / float(freqs[ip]), 3)
+    med = float(np.median(power[phys])) if phys.any() else 0.0
+    if med > 0:
+        contrast = power / med
+        ip = int(np.argmax(np.where(phys, power, 0)))
+        peak_contrast = float(contrast[ip])
+        # spacing from the LOWEST-frequency significant local max: on a
+        # sharp plane comb (full-density data) a HARMONIC can out-power
+        # the fundamental, and 10/f of a harmonic halves the spacing
+        sig = [i for i in np.where(phys)[0]
+               if 0 < i < len(power) - 1 and contrast[i] >= 8.0
+               and power[i] >= power[i - 1] and power[i] >= power[i + 1]]
+        spacing_A = round(10.0 / float(freqs[min(sig) if sig else ip]), 3)
     has_signal = bool(peak_contrast >= 8.0)
     res = {"species_a": a_members, "species_b": b_members,
            "n_centers": int(len(centers)),
@@ -1025,14 +1033,51 @@ def family1_report(workdir: str, run: dict,
         s.append("<p>Verdict: " + badge(gate.get("null_gate_passed"),
                  "PASSED - detection collapses under label shuffling",
                  "NOT PASSED - no defensible cluster claim") + "</p>")
+    wc = run.get("wc") or []
+    if wc:
+        s.append("<h2>Warren-Cowley SRO parameters (shuffle-controlled)"
+                 "</h2>")
+        rows = []
+        for w in ([wc] if isinstance(wc, dict) else wc):
+            if "error" in w:
+                continue
+            pair = (f"{'+'.join(w['center_species'][:2])} &rarr; "
+                    f"{'+'.join(w['neighbor_species'][:2])}")
+            for i, win in enumerate(w["shell_windows_nm"]):
+                rows.append(
+                    f"<tr><td>{pair}</td><td>{i + 1}</td>"
+                    f"<td>{win[0]}&ndash;{win[1]}</td>"
+                    f"<td>{w['alpha_per_shell'][i]:+.4f}</td>"
+                    f"<td>{w['alpha_null_mean'][i]:+.4f} &plusmn; "
+                    f"{w['alpha_null_std'][i]:.4f}</td>"
+                    f"<td>{w['z_per_shell'][i]}</td>"
+                    "<td>" + ("<span class='pass'>yes</span>"
+                              if w["significant"][i] else "no") + "</td>"
+                    "</tr>")
+        if rows:
+            s.append("<table><tr><th>pair (A &rarr; B)</th><th>shell</th>"
+                     "<th>window [nm]</th><th>&alpha;</th>"
+                     "<th>shuffle null</th><th>z</th><th>significant"
+                     "</th></tr>" + "".join(rows) + "</table>")
+            s.append("<p>&alpha; &lt; 0 = A-B association (ordering "
+                     "tendency); &alpha; &gt; 0 = avoidance / "
+                     "self-clustering; only shuffle-significant shells "
+                     "are claimable.</p>")
+        warn = next((w.get("validity_warning")
+                     for w in ([wc] if isinstance(wc, dict) else wc)
+                     if isinstance(w, dict) and w.get("validity_warning")),
+                    None)
+        if warn:
+            s.append(f'<div class="note">{_esc(warn)}</div>')
     rdf = run.get("rdf") or {}
     if rdf:
         s.append("<h2>RDF vs label-shuffle null (model-free "
                  "corroboration)</h2>")
-        s.append(kv_table(rdf, ["peak_ratio", "peak_r_nm",
-                                "significant_excess", "excess_range_nm",
-                                "excess_persists_to_r_max"]))
-        s.append(img(rdf.get("png")))
+        for r in ([rdf] if isinstance(rdf, dict) else rdf):
+            s.append(kv_table(r, ["species", "peak_ratio", "peak_r_nm",
+                                  "significant_excess", "excess_range_nm",
+                                  "excess_persists_to_r_max"]))
+            s.append(img(r.get("png")))
     zs = run.get("zsdm") or {}
     if zs:
         s.append("<h2>z-SDM crystallographic-signal gate</h2>")

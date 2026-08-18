@@ -93,8 +93,16 @@ walk in your plan/decisions:
   MSM localizes the oxide pocket at 150 nm below apex (map_species_zone
   found it at ~145 nm; independent-method concordance), 21.8k-ion
   CrO/Ni-rich cluster + 2 smaller, null contrast 15x, z = 6.3; z-SDM
-  contrast 3.1 => site-resolved claims correctly ruled out. wtav CSRO
-  answer key (WC route) still pending.
+  contrast 3.1 => site-resolved claims correctly ruled out.
+- wtav CSRO answer-key regression PASSED (D2, scoped selection walk):
+  first-shell WC on the full-density WTaV nanotip (cutoff 2.948 A, 9
+  ordered pairs, shuffle-controlled) reproduces the prior codegen
+  answer key with max |delta alpha| = 0.0099 and sign agreement on all
+  significant pairs (Ta-W attraction -0.046, W-V avoidance +0.034);
+  k-NN screen showed no discrete clusters => MSM correctly not run;
+  z-SDM admissibility PASSED (contrast 99, a/2 plane spacing);
+  ML-CSRO correctly withheld (out of trained domain).
+  Run: ~/Downloads/abtem/results/wtav_family1/.
 - Unit regression: tests/test_cluster_tools.py (11 checks - blind
   recovery, cluster-free refusal, WC shuffle control + analytic B2
   alpha = +1, z-SDM gate both verdicts + bcc a/2 spacing).

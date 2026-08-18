@@ -115,7 +115,7 @@ def neighborhoods_from_structure(structure_path: str, type_map: dict | None = No
     lines += [f"Ion{i}={s}" for i, s in enumerate(species, 1)]
     lines += ["[Ranges]", f"Number={len(species)}"]
     lines += [f"Range{i}={mass_of[s]-0.4:.2f} {mass_of[s]+0.4:.2f} "
-              f"Vol:0.0 Name:{s} Color:836EAA"
+              f"Vol:0.0 {s}:1 Color:836EAA"
               for i, s in enumerate(species, 1)]
     rrng_path.write_text("\n".join(lines) + "\n")
 

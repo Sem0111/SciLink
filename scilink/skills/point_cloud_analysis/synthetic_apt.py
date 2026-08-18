@@ -133,8 +133,10 @@ def write_apt_dataset(pos_A: np.ndarray, species: np.ndarray, out_dir: str,
     lines = ["[Ions]", f"Number={len(syms)}"]
     lines += [f"Ion{i}={s}" for i, s in enumerate(syms, 1)]
     lines += ["[Ranges]", f"Number={len(syms)}"]
+    # element:count composition entries (AP Suite canon) - the Name: form
+    # is ignored by apav and yields an EMPTY RangeCollection
     lines += [f"Range{i}={mass_of[s]-0.4:.2f} {mass_of[s]+0.4:.2f} "
-              f"Vol:0.0 Name:{s} Color:836EAA" for i, s in enumerate(syms, 1)]
+              f"Vol:0.0 {s}:1 Color:836EAA" for i, s in enumerate(syms, 1)]
     (out / f"{name}.rrng").write_text("\n".join(lines) + "\n")
     comp = {s: round(float((species == s).mean()) * 100, 3) for s in syms}
     truth = {**truth, "final_composition_at_pct": comp,

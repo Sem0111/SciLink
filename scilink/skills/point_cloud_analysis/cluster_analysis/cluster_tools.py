@@ -54,9 +54,13 @@ def _load_ranged_cloud(pos_path, rrng_path):
     if p.endswith(".apt"):
         roi = apav.load_apt(str(pos_path))
         xyz, mass = roi.xyz, roi.mass
-    elif p.endswith((".pos", ".epos")):
-        roi = (apav.load_pos if p.endswith(".pos")
-               else apav.load_epos)(str(pos_path))
+    elif p.endswith(".pos"):
+        # native read (big-endian float32 x,y,z,Da records) - apav's pos
+        # reader still uses the numpy-1 newbyteorder API
+        arr = np.fromfile(str(pos_path), dtype=">f4").reshape(-1, 4)
+        xyz, mass = arr[:, :3].astype(np.float64), arr[:, 3].astype(np.float64)
+    elif p.endswith(".epos"):
+        roi = apav.load_epos(str(pos_path))
         xyz, mass = roi.xyz, roi.mass
     else:  # (x, y, z [nm], Da) csv - the synthetic-benchmark contract
         arr = np.loadtxt(pos_path, delimiter=",")
@@ -379,6 +383,7 @@ def msm_detect(pos_path: str, rrng_path: str, species,
         lab_c, cnt_c = np.unique(labels[m], return_counts=True)
         comp = {str(l): round(float(n) / len(p), 4)
                 for l, n in sorted(zip(lab_c, cnt_c), key=lambda t: -t[1])}
+        label_counts = {str(l): int(n) for l, n in zip(lab_c, cnt_c)}
         n_t = int(np.isin(labels[m], members).sum())
         clusters.append({
             "id": c, "n_ions": int(m.sum()), "n_target_ions": n_t,
@@ -386,7 +391,8 @@ def msm_detect(pos_path: str, rrng_path: str, species,
             "radius_gyration_nm": round(rg, 3),
             "guinier_radius_nm": round(rg * np.sqrt(5.0 / 3.0), 3),
             "target_fraction": round(n_t / m.sum(), 3),
-            "composition_ionic": comp})
+            "composition_ionic": comp,
+            "label_counts": label_counts})
     vol = _hull_volume_nm3(xyz)
     matrix = cid == -1
     lab_m, cnt_m = np.unique(labels[matrix], return_counts=True)

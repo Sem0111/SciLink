@@ -105,6 +105,16 @@ def main():
           f"(contrast {z_deg['fft_peak_contrast']})",
           not z_deg["crystallographic_signal"])
 
+    print("5) CCD community reconciliation (phantom-partition guard):")
+    from scilink.skills.point_cloud_analysis.apt_ccd.apt_tools import (
+        _reconcile_communities)
+    comps = {"0": {"Ni": 0.5}, "1": {"Cr": 0.4}, "2": {"V": 0.6}}
+    rec = _reconcile_communities(comps, {-1: 5, 0: 3, 1: 2})
+    check("empty partition detected", rec["empty_partitions"] == ["2"])
+    check("unassigned counted", rec["unassigned_neighborhoods"] == 5)
+    check("assigned counts complete",
+          rec["community_assigned_counts"] == {"0": 3, "1": 2, "2": 0})
+
     n_fail = sum(not v for v in results.values())
     print(f"\n{len(results) - n_fail}/{len(results)} passed")
     raise SystemExit(1 if n_fail else 0)

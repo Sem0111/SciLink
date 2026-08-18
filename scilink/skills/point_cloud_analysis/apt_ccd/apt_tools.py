@@ -129,6 +129,22 @@ def neighborhoods_from_structure(structure_path: str, type_map: dict | None = No
     return _jsonable(res)
 
 
+def _reconcile_communities(compositions: dict, counts: dict) -> dict:
+    """Reconcile composition rows (one per Louvain partition) against the
+    final mode-vote assignment counts: a partition can end up with ZERO
+    assigned neighborhoods (its members ambiguous/outvoted -> -1), and
+    its composition centroid is then an unstable ensemble direction, NOT
+    a finding. Returns {assigned_counts, unassigned, empty_partitions}."""
+    assigned = {str(k): int(v) for k, v in (counts or {}).items()
+                if str(k) != "-1"}
+    empty = [cid for cid in compositions if cid not in assigned]
+    return {"community_assigned_counts": {
+                cid: assigned.get(cid, 0) for cid in compositions},
+            "unassigned_neighborhoods": int((counts or {}).get(-1, 0)
+                                            or (counts or {}).get("-1", 0)),
+            "empty_partitions": empty}
+
+
 def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
                        k_values: list | None = None,
                        ignore_ions: list | None = None,
@@ -192,6 +208,17 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
                        for ion, ks in zip(ions, row)}
             for cid, row in enumerate(raw)}
         res["community_composition_ions"] = ions
+        rec = _reconcile_communities(res["community_compositions"],
+                                     res.get("community_neighborhood_counts"))
+        res.update(rec)
+        if rec["empty_partitions"]:
+            res["empty_partition_note"] = (
+                "partitions with ZERO assigned neighborhoods (members "
+                "ambiguous across the ensemble): their composition "
+                "centroids are unstable directions, NOT findings - "
+                f"ids {rec['empty_partitions']}")
+            for cid in rec["empty_partitions"]:
+                res["community_compositions"].pop(cid, None)
     res = _jsonable(res)
     stem = Path(neighborhood_csv).stem
     res["community_xyz"] = str(Path(savedir) / f"{stem}_community_clustering.xyz")

@@ -208,6 +208,13 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
                        for ion, ks in zip(ions, row)}
             for cid, row in enumerate(raw)}
         res["community_composition_ions"] = ions
+        # element-keyed view for single-element ions ('Cr1' -> 'Cr'): ion
+        # labels vary by rrng style (Cr / Cr1) and callers keep mis-keying
+        res["community_compositions_by_element"] = {
+            cid: {(_re.match(r"^([A-Z][a-z]?)\d*$", ion).group(1)
+                   if _re.match(r"^([A-Z][a-z]?)\d*$", ion) else ion): ks
+                  for ion, ks in comp.items()}
+            for cid, comp in res["community_compositions"].items()}
         rec = _reconcile_communities(res["community_compositions"],
                                      res.get("community_neighborhood_counts"))
         res.update(rec)
@@ -805,10 +812,14 @@ TOOL_SPECS = [
         when_to_use=("After neighborhood generation, to find and "
                      "characterize segregated regions; positive KS = "
                      "enriched, negative = depleted vs bulk."),
-        returns=("community_count, community_neighborhood_counts, "
+        returns=("community_count, community_assigned_counts, "
                  "community_compositions as {community_id: {ion_label: "
-                 "signed KS}} (positive = enriched vs bulk), "
-                 "community_map_png, community_xyz point cloud"),
+                 "signed KS}} (labels are hill formulas like 'Cr1'), "
+                 "community_compositions_by_element (same, keyed by bare "
+                 "element symbol - USE THIS for element lookups), "
+                 "empty_partition_note, community_map_png, community_xyz; "
+                 "communities are NOT segregation evidence without a "
+                 "label-shuffle control"),
         example="seg = detect_segregation(nb['neighborhood_csv'])",
     ),
 ]

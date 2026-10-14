@@ -98,7 +98,9 @@ def detect_planar_feature(pos_path: str, rrng_path: str, species,
            "baseline_fraction": round(base, 4), "n_features": len(feats),
            "features": feats,
            "top_feature": feats[0] if feats else None,
-           "top_is_planar": bool(feats and feats[0]["planarity"] >= 0.6)}
+           # noise blobs reach ~0.7 on the synthetic control; genuine
+           # boundaries score >= 0.95 - the gate downstream still decides
+           "top_is_planar": bool(feats and feats[0]["planarity"] >= 0.85)}
 
     fig, ax = plt.subplots(figsize=(6, 8))
     sub = np.random.RandomState(0).choice(len(xyz), min(len(xyz), 120000),
@@ -219,15 +221,18 @@ def interface_profile(pos_path: str, rrng_path: str, species,
             "gamma_ladder": (round(g_lad, 3) if g_lad is not None else None),
             "passed": bool(g_lad is not None and abs(g_int - g_lad)
                            <= max(0.25 * abs(g_int), 3 * sig_poisson))},
+        # two-sided: DEPLETION (negative excess, e.g. Cr at RIS
+        # boundaries) is as much a finding as enrichment
         "shuffle_null": {"gamma_null_mean": round(gm, 3),
                          "gamma_null_std": round(gs, 3),
                          "z": round((g_int - gm) / max(gs, sig_poisson,
                                                        1e-9), 1),
-                         "passed": bool(g_int > gm + 3 * max(gs,
-                                                               sig_poisson))}}
-    ipk = int(np.nanargmax(np.where(np.isfinite(prof), prof, -1)))
-    half = c_bulk + 0.5 * (prof[ipk] - c_bulk)
-    above = np.where(np.nan_to_num(prof) >= half)[0]
+                         "passed": bool(abs(g_int - gm)
+                                        > 3 * max(gs, sig_poisson))}}
+    # extremum and width on the DEVIATION from bulk (sign-agnostic)
+    dev = np.where(np.isfinite(prof), prof - c_bulk, 0.0)
+    ipk = int(np.argmax(np.abs(dev)))
+    above = np.where(np.abs(dev) >= 0.5 * abs(dev[ipk]))[0]
     fwhm = float((above.max() - above.min() + 1) * bin_nm) if len(above) \
         else None
     res = {"species": members, "point_nm": list(map(float, point_nm)),
@@ -237,6 +242,7 @@ def interface_profile(pos_path: str, rrng_path: str, species,
            "c_bulk_far_field": round(c_bulk, 4),
            "peak_fraction": round(float(prof[ipk]), 4),
            "peak_position_nm": round(float(mids[ipk]), 2),
+           "sign": ("enrichment" if dev[ipk] > 0 else "depletion"),
            "fwhm_nm": (round(fwhm, 2) if fwhm else None),
            "gamma_detected_per_nm2": round(g_int, 3),
            "gamma_ladder_per_nm2": (round(g_lad, 3) if g_lad is not None

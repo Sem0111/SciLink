@@ -43,5 +43,14 @@ segregation is laterally uniform.
 - Blind score on the synthetic family-3 benchmark
   (make_segregation_benchmark: one tilted Ni-segregated slab of known
   normal, position, width and gamma_true; excess_fraction=0 control).
-- Real regression: R31 PWR steel planar Ni-rich / Cr-depleted sheets
-  (RIS signature found by family-1 structure analysis).
+- SCORED (blind; plane detected, not given): normal error 0.81 deg,
+  plane offset 0.29 nm, planarity 0.994, gamma recovery 0.94
+  (integration vs ladder within 5%), FWHM 0.9 nm vs 0.8 seeded; the
+  boundary-free control produced a noise "plane" (planarity 0.68) that
+  the shuffle gate rejected (gamma ~0) - the gate, not the detector,
+  is the accept criterion (planarity threshold now 0.85).
+- Real regression PASSED: R31 PWR steel - three thin-in-x sheets
+  (planarity 0.95-0.96); top sheet Ni 9.3% bulk -> 69.5% at the plane,
+  gamma_Ni = +39 /nm2 (detected basis, routes agree 1.5%), Cr DEPLETED
+  gamma_Cr = -11.3 /nm2 (z -15.5), in-plane patchiness 1.04 (uniform) =
+  radiation-induced segregation at a boundary, all gates two-sided.

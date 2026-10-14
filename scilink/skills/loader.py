@@ -60,7 +60,8 @@ def _vocab_for(domain: str) -> set:
 # datacube skill into CurveFittingAgent. Genuinely cross-cutting skills live in
 # OTHER (non-modality) domains (e.g. structure_matching/xrd) and stay usable
 # cross-domain.
-_MODALITY_DOMAINS = frozenset({"curve_fitting", "image_analysis", "hyperspectral"})
+_MODALITY_DOMAINS = frozenset({"curve_fitting", "image_analysis", "hyperspectral",
+                               "point_cloud_analysis"})
 
 _FRONTMATTER_RE = re.compile(r"\A---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 

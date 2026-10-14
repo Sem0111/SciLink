@@ -180,6 +180,8 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
     # cost_rates={"in": .., "out": ..}. Reported alongside the token counts
     # so the raw numbers stay authoritative.
     COST_RATES_USD_PER_MTOK = {"in": 15.0, "out": 75.0}
+    # correction ladder depth (curve/image-agent precedent)
+    MAX_ATTEMPTS = 5
 
     def _llm(self, tag: str, prompt: str, workdir: Path) -> str:
         t0 = time.time()
@@ -219,16 +221,30 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
 
     def _run_phase(self, tag: str, prompt: str, marker: str, workdir: Path,
                    timeout: int) -> dict:
-        """LLM -> script -> sandboxed subprocess; one regenerate on failure.
+        """LLM -> script -> sandboxed subprocess with the curve/image-agent
+        correction ladder: up to MAX_ATTEMPTS, each correction NARROW ("fix
+        only this error", keep everything else, honor the plan), with an
+        error memory so a fix never reintroduces an earlier failure; a
+        timeout first re-runs the SAME script at 2x budget (no LLM) before
+        any correction.
 
         Returns the JSON payload printed on the marker line."""
-        current = prompt
-        for attempt in (1, 2, 3):
-            code = self._extract_code(self._llm(f"{tag}_{attempt}", current,
-                                                workdir))
+        code = None
+        error_memory: list[str] = []
+        for attempt in range(1, self.MAX_ATTEMPTS + 1):
+            if code is None:
+                code = self._extract_code(self._llm(f"{tag}_{attempt}", prompt,
+                                                    workdir))
             (workdir / f"{tag}_{attempt}.py").write_text(code)
             res = self.executor.execute_script(code, working_dir=str(workdir),
                                                timeout=timeout)
+            if "timed out" in str(res.get("message", "")).lower() \
+                    and not res.get("_escalated"):
+                # adaptive timeout: same script, double budget, once
+                self.logger.info("timeout - re-running at 2x budget")
+                res = self.executor.execute_script(
+                    code, working_dir=str(workdir), timeout=2 * timeout)
+                res["_escalated"] = True
             stdout = res.get("stdout", "")
             (workdir / f"{tag}_{attempt}.out").write_text(
                 stdout[-20000:] + "\n--- STATUS ---\n"
@@ -240,13 +256,28 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                     break
             if res.get("status") == "success" and payload is not None:
                 return payload
-            err = res.get("message") or ("script ran but did not print "
-                                         + marker)
-            current = (prompt
-                       + f"\n\nYour previous script failed:\n```python\n{code}\n```\n"
-                       f"Error / output tail:\n{str(err)[-2000:]}\n{stdout[-2000:]}\n"
-                       "Fix the problem and return the complete corrected script.")
-        raise RuntimeError(f"phase {tag} failed after retry")
+            err = str(res.get("message") or ("script ran but did not print "
+                                             + marker))
+            error_memory.append(f"attempt {attempt}: {err[-600:]}")
+            if attempt == self.MAX_ATTEMPTS:
+                break
+            memory = "\n".join(error_memory[:-1])
+            fix_prompt = (
+                "A python script you wrote for the task below failed. Fix ONLY "
+                "the error shown - keep every other line, the same tools, the "
+                "same plan steps, deliverable labels and output format; do "
+                "not restructure, simplify or drop analyses. Return the "
+                "COMPLETE corrected script in one ```python block.\n\n"
+                f"TASK CONTEXT (abridged):\n{prompt[-3500:]}\n\n"
+                f"SCRIPT:\n```python\n{code}\n```\n\n"
+                f"ERROR (attempt {attempt}):\n{err[-2500:]}\n"
+                f"OUTPUT TAIL:\n{stdout[-1500:]}\n"
+                + (f"\nEARLIER ERRORS ALREADY FIXED - do not reintroduce "
+                   f"them:\n{memory}\n" if memory else ""))
+            code = self._extract_code(self._llm(f"{tag}_fix{attempt}",
+                                                fix_prompt, workdir))
+        raise RuntimeError(f"phase {tag} failed after {self.MAX_ATTEMPTS} "
+                           f"attempts: {error_memory[-1][:300]}")
 
     def _parse_interpretation(self, raw: str, workdir: Path) -> dict:
         def _attempt(text):
@@ -272,6 +303,32 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
         except Exception:
             return {"detailed_analysis": raw, "scientific_claims": [],
                     "caveats": ""}
+
+    # ------------------------------------------------------------------
+    # skill-markdown guidance injection (Tier-1 #4)
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _skill_guidance(active_skills, max_chars_per_skill: int = 6000) -> str:
+        """Render each active point-cloud skill's overview + planning +
+        validation sections for the prompt. Until this existed the agent
+        saw only ToolSpec cards; the markdown rules (controls before
+        claims, method-selection walk) were invisible to it."""
+        from scilink.skills.loader import load_skill
+
+        blocks = []
+        for name in active_skills:
+            try:
+                sk = load_skill(name, domain="point_cloud_analysis")
+            except Exception:  # noqa: BLE001 - foreign-domain skills (stem)
+                continue
+            text = ""
+            for sec in ("overview", "planning", "validation"):
+                body = (sk.get(sec) or "").strip()
+                if body:
+                    text += f"[{sec}]\n{body}\n"
+            if text:
+                blocks.append(f"### skill: {name}\n{text[:max_chars_per_skill]}")
+        return "\n".join(blocks)
 
     # ------------------------------------------------------------------
     # plan-first phase + deliverables contract
@@ -430,12 +487,17 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
 
         inventory = format_tool_inventory(agent="pointcloud_analysis",
                                           active_skills=DEFAULT_ACTIVE_SKILLS)
+        guidance = self._skill_guidance(DEFAULT_ACTIVE_SKILLS)
         common = (f"You are PointCloudAnalysisAgent, working on the atomistic "
                   f"point cloud at {path}.\n\nOBJECTIVE:\n{objective}\n\n"
                   + (f"HINTS:\n{hints}\n\n" if hints else "")
                   + f"METADATA:\n{json.dumps(metadata, indent=1)}\n\n"
                   f"AVAILABLE TOOLS (import and call exactly as documented):\n"
-                  f"{inventory}\nPHYSICS NOTES:\n{_PHYSICS_NOTES}\n"
+                  f"{inventory}\n"
+                  + (f"SKILL GUIDANCE (method-selection rules, gates and "
+                     f"validation records per skill - BINDING on planning):\n"
+                     f"{guidance}\n" if guidance else "")
+                  + f"PHYSICS NOTES:\n{_PHYSICS_NOTES}\n"
                   f"BUDGET NOTES:\n{_BUDGET_NOTES}\n")
 
         try:

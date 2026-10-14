@@ -339,8 +339,16 @@ class ScriptExecutor:
                 stdout, stderr = proc.communicate(timeout=effective_timeout)
             except subprocess.TimeoutExpired:
                 proc.kill()
-                proc.wait()
-                return {"status": "error", "message": f"Script execution timed out after {effective_timeout} seconds."}
+                # keep whatever the script printed before the kill - a
+                # timeout is diagnosable only through its progress output
+                try:
+                    partial_out, partial_err = proc.communicate(timeout=5)
+                except Exception:  # noqa: BLE001
+                    partial_out, partial_err = "", ""
+                    proc.wait()
+                return {"status": "error",
+                        "message": f"Script execution timed out after {effective_timeout} seconds.",
+                        "stdout": partial_out or "", "stderr": partial_err or ""}
             finally:
                 _unregister_subprocess(proc)
 

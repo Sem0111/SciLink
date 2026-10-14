@@ -176,6 +176,68 @@ def seed_planar_segregation(pos: np.ndarray, species: np.ndarray, rng,
             "added_fraction": excess_fraction, "n_enriched": int(len(flip))}
 
 
+def seed_planar_segregation_general(pos: np.ndarray, species: np.ndarray,
+                                    rng, point_A, normal, width_A: float,
+                                    solute: str = "Ni",
+                                    excess_fraction: float = 0.15,
+                                    lattice_density_A3: float | None = None
+                                    ) -> dict:
+    """Enrich a slab of arbitrary orientation (a synthetic boundary with
+    KNOWN Gibbsian excess). Truth: Gamma_true [atoms/nm^2] = enriched
+    atoms / slab area, area = slab atoms / (lattice density x width)."""
+    n = np.asarray(normal, float)
+    n /= np.linalg.norm(n)
+    d = (pos - np.asarray(point_A, float)) @ n
+    idx = np.where(np.abs(d) < width_A / 2)[0]
+    flip = idx[rng.random(len(idx)) < excess_fraction]
+    species[flip] = solute
+    if lattice_density_A3 is None:
+        lattice_density_A3 = len(pos) / np.prod(np.ptp(pos, axis=0))
+    area_A2 = len(idx) / (lattice_density_A3 * width_A)
+    return {"point_A": [round(float(v), 2) for v in point_A],
+            "normal": [round(float(v), 4) for v in n],
+            "width_A": width_A, "solute": solute,
+            "added_fraction": excess_fraction,
+            "n_enriched": int(len(flip)),
+            "area_nm2": round(float(area_A2) / 100.0, 1),
+            "gamma_true_atoms_per_nm2": round(
+                float(len(flip)) / (area_A2 / 100.0), 3)}
+
+
+def make_segregation_benchmark(out_dir: str, name: str = "synth_gb",
+                               seed: int = 23, structure: str = "bcc",
+                               a: float = 2.87, size_nm=(40., 40., 60.),
+                               matrix: str = "Fe",
+                               solutes: dict | None = None,
+                               normal=(0.25, 0.0, 1.0), width_A: float = 8.0,
+                               solute: str = "Ni",
+                               excess_fraction: float = 0.2,
+                               efficiency: float = DEFAULT_EFFICIENCY,
+                               sigma_lateral_A: float = DEFAULT_SIGMA_LATERAL_A,
+                               sigma_depth_A: float = DEFAULT_SIGMA_DEPTH_A) -> dict:
+    """One-call family-3 benchmark: Fe-Cr-Ni matrix with ONE tilted
+    Ni-segregated boundary of known position, normal, width and
+    Gibbsian excess, APT-degraded. excess_fraction=0 -> feature-free
+    control twin."""
+    rng = np.random.default_rng(seed)
+    solutes = solutes if solutes is not None else {"Cr": 0.10, "Ni": 0.05}
+    pos = build_lattice(structure, a, size_nm)
+    species = seed_solid_solution(len(pos), matrix, solutes, rng)
+    centre = (pos.min(axis=0) + pos.max(axis=0)) / 2
+    plane = seed_planar_segregation_general(
+        pos, species, rng, centre, normal, width_A, solute, excess_fraction,
+        lattice_density_A3=(2 if structure == "bcc" else 4) / a**3)
+    p, s = apt_degrade(pos, species, rng, efficiency, sigma_lateral_A,
+                       sigma_depth_A)
+    return write_apt_dataset(p, s, out_dir, name, {
+        "kind": "segregation_benchmark", "seed": seed,
+        "structure": structure, "lattice_a_A": a,
+        "matrix": matrix, "solutes_nominal": solutes, "plane": plane,
+        "degradation": {"efficiency": efficiency,
+                        "sigma_lateral_A": sigma_lateral_A,
+                        "sigma_depth_A": sigma_depth_A}})
+
+
 def apt_degrade(pos: np.ndarray, species: np.ndarray, rng,
                 efficiency: float = DEFAULT_EFFICIENCY,
                 sigma_lateral_A: float = DEFAULT_SIGMA_LATERAL_A,

@@ -175,6 +175,12 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
     # ------------------------------------------------------------------
     # LLM + execution plumbing
     # ------------------------------------------------------------------
+    # USD per million tokens - an ESTIMATE for cost accounting (Opus-class
+    # Bedrock list rates); override per deployment via the constructor kwarg
+    # cost_rates={"in": .., "out": ..}. Reported alongside the token counts
+    # so the raw numbers stay authoritative.
+    COST_RATES_USD_PER_MTOK = {"in": 15.0, "out": 75.0}
+
     def _llm(self, tag: str, prompt: str, workdir: Path) -> str:
         t0 = time.time()
         response = self.model.generate_content(prompt)
@@ -183,8 +189,22 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
         text = (getattr(response, "raw_text", None)
                 or (response.text if hasattr(response, "text")
                     else str(response)))
+        usage = getattr(response, "usage", None) or {}
+        t_in = int(usage.get("prompt_tokens") or 0)
+        t_out = int(usage.get("completion_tokens") or 0)
+        acc = getattr(self, "_cost", None)
+        if acc is None:
+            acc = self._cost = {"calls": 0, "tokens_in": 0, "tokens_out": 0}
+        acc["calls"] += 1
+        acc["tokens_in"] += t_in
+        acc["tokens_out"] += t_out
+        rates = getattr(self, "cost_rates", None) or self.COST_RATES_USD_PER_MTOK
+        acc["cost_usd"] = round(acc["tokens_in"] / 1e6 * rates["in"]
+                                + acc["tokens_out"] / 1e6 * rates["out"], 3)
+        acc["rates_usd_per_mtok"] = rates
         self.transcript.append({"phase": tag,
                                 "elapsed_s": round(time.time() - t0, 1),
+                                "tokens_in": t_in, "tokens_out": t_out,
                                 "prompt": prompt[-4000:], "response": text})
         (workdir / "transcript.json").write_text(
             json.dumps(self.transcript, indent=1, default=str))
@@ -406,6 +426,7 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
             f"{datetime.now().strftime('%Y%m%d_%H%M%S')}")
         workdir.mkdir(parents=True, exist_ok=True)
         self.transcript = []
+        self._cost = {"calls": 0, "tokens_in": 0, "tokens_out": 0}
 
         inventory = format_tool_inventory(agent="pointcloud_analysis",
                                           active_skills=DEFAULT_ACTIVE_SKILLS)
@@ -529,10 +550,11 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
             interactive = {p.stem.replace("_", " "): str(p)
                            for p in sorted(workdir.rglob("*.html"))
                            if p.name != "report.html"}
+            cost = dict(getattr(self, "_cost", {}) or {})
             report = build_html_report(
                 str(workdir), objective, metadata, scout, result, gate,
                 interpretation, decisions_text=decisions, images=images,
-                interactive=interactive)
+                interactive=interactive, cost=cost or None)
 
             status = "success" if gate.get("passed") else "partial"
             out = {"status": status,
@@ -542,7 +564,7 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                    "caveats": interpretation.get("caveats", ""),
                    "output_directory": str(workdir),
                    "gate": gate, "scout": scout, "result": result,
-                   "report_html": report}
+                   "report_html": report, "plan": plan, "cost": cost}
             if status == "partial":
                 out["warnings"] = ["deterministic verification gate failed - "
                                    "see gate field"]

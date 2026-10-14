@@ -648,7 +648,14 @@ class LiteLLMGenerativeModel:
         # it: _clean_text's embedded-JSON extraction (Pattern 3) greedily slices from
         # the first '{' to the last '}', which mangles a raw script containing
         # f-string/dict braces before the codegen parser ever sees it (#238).
-        return SimpleNamespace(text=first_text, candidates=candidates, raw_text=first_raw)
+        # token usage, when the provider reports it (cost accounting)
+        u = getattr(response, "usage", None)
+        usage = None
+        if u is not None:
+            usage = {"prompt_tokens": getattr(u, "prompt_tokens", None),
+                     "completion_tokens": getattr(u, "completion_tokens", None)}
+        return SimpleNamespace(text=first_text, candidates=candidates,
+                               raw_text=first_raw, usage=usage)
     
     def _clean_text(self, text: str) -> str:
         """

@@ -484,8 +484,10 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
             gate["plan_conformance"] = bool(conf["passed"])
             gate["planned_gates_all_passed"] = not conf["failed_gates"]
             gate["conformance"] = conf
-            gate["passed"] = bool(gate.get("passed") and conf["passed"]
-                                  and not conf["failed_gates"])
+            # a planned gate that FAILS is a legitimate negative result (the
+            # claim is withheld), not a pipeline failure: only nonconformance
+            # (unreported gates, missing tools/deliverables) fails the run
+            gate["passed"] = bool(gate.get("passed") and conf["passed"])
 
             # plan + conformance become the report's decisions block
             walk = "\n".join(

@@ -564,13 +564,26 @@ def rdf_compare(pos_path: str, rrng_path: str, species,
             r_decay = round(float(rc[past_peak[0]]), 2)
         else:
             persists = True
+    # reconstruction-artifact regime: pair separations below ~0.15 nm are
+    # dominated by multi-hit / detector correlations, not chemistry - a
+    # claimable excess must exist at PHYSICAL neighbor distances
+    phys = valid & (rc >= 0.15)
+    ip = (int(np.nanargmax(np.where(phys, ratio, -np.inf)))
+          if phys.any() else imax)
     res = {"species": members, "r_max_nm": r_max_nm,
            "peak_ratio": round(float(ratio[imax]), 2),
            "peak_r_nm": round(float(rc[imax]), 3),
+           "peak_in_artifact_regime": bool(rc[imax] < 0.15),
+           "physical_peak_ratio": round(float(ratio[ip]), 2),
+           "physical_peak_r_nm": round(float(rc[ip]), 3),
+           "physical_excess": bool((above & phys).any()),
            "significant_excess": bool(above.any()),
            "excess_range_nm": r_decay,
            "excess_persists_to_r_max": persists,
-           "n_target_ions": int(tmask.sum())}
+           "n_target_ions": int(tmask.sum()),
+           "claim_rule": ("claim chemistry ONLY from physical_excess "
+                          "(r >= 0.15 nm); sub-0.15 nm peaks are "
+                          "multi-hit/detector artifacts")}
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(rc[valid], ratio[valid], "-", color=_COLORS[0],
@@ -1288,8 +1301,10 @@ TOOL_SPECS = [
         when_to_use=("Open-ended 'any clustering/SRO?' questions - run "
                      "BEFORE committing to a discrete-cluster model; also "
                      "corroborates MSM results (concordance rule)."),
-        returns=("peak_ratio, peak_r_nm, significant_excess, "
-                 "excess_range_nm, png"),
+        returns=("physical_excess + physical_peak_ratio/r (the ONLY basis "
+                 "for a chemistry claim; sub-0.15 nm peaks are multi-hit "
+                 "artifacts and are flagged peak_in_artifact_regime), "
+                 "raw peak_ratio/peak_r_nm, excess_range_nm, png"),
         example="rdf = rdf_compare('tip.csv', 't.rrng', 'Cu', workdir='out')",
     ),
     ToolSpec(

@@ -97,6 +97,24 @@ the imaging conditions, (5) the image-vs-structure verification cross-check
 is wanted. Otherwise SKIP simulation and answer from structure-side tools.
 """
 
+_PLAN_SCHEMA = (
+    'Produce your PLAN as a single fenced ```json block with exactly these '
+    'fields:\n'
+    '{"method_selection": [{"axis": "cloud kind | crystallographic gate | '
+    'question specificity | rare species | concordance | simulate?", '
+    '"decision": "...", "evidence": "scout field(s) that justify it"}], '
+    '"steps": [{"tool": "registered tool name, or fresh_code", "purpose": '
+    '"...", "why_fresh": "ONLY when tool is fresh_code: why no registered '
+    'tool covers it"}], '
+    '"gates": [{"name": "short id", "tool": "tool whose output carries the '
+    'verdict", "pass_condition": "..."}], '
+    '"deliverables": {"figures": ["hero_png", ... labels you will put in '
+    'files], "interactive_3d": [labels], "report_sections": [...]}, '
+    '"not_doing": [{"method": "...", "reason": "..."}]}\n'
+    'Rules: prefer registered tools; every positive claim needs a gate from '
+    'the list; name the hero_png figure first; keep it to what the objective '
+    'and evidence warrant - do not plan the whole tool battery.')
+
 _INTERPRET_SCHEMA = (
     'Produce the scientific interpretation as a single fenced ```json block '
     'with exactly these fields:\n'
@@ -236,6 +254,86 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                     "caveats": ""}
 
     # ------------------------------------------------------------------
+    # plan-first phase + deliverables contract
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _parse_json_block(text: str) -> dict:
+        """Lenient JSON: fenced block -> trailing-comma repair -> first
+        complete object."""
+        m = re.findall(r"```json\s*(\{.*?\})\s*```", text, re.S)
+        block = m[-1] if m else text[text.find("{"):]
+        try:
+            return json.loads(block)
+        except json.JSONDecodeError:
+            pass
+        repaired = re.sub(r",\s*([}\]])", r"\1", block)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            return json.JSONDecoder().raw_decode(repaired)[0]
+
+    def _plan(self, common: str, scout: dict, workdir: Path) -> dict:
+        """PLAN phase: a structured, recorded contract BEFORE any analysis
+        code is written - method-selection walk, tool steps, gates,
+        deliverables, and what is deliberately not done."""
+        raw = self._llm("plan", common + (
+            "PHASE 2 - PLAN (no code yet).\nScout evidence:\n"
+            f"{json.dumps(scout, indent=1)}\n\n"
+            "Walk the method-selection axes IN ORDER citing scout evidence, "
+            "then commit to the analysis steps, gates and deliverables. "
+            + _PLAN_SCHEMA), workdir)
+        try:
+            plan = self._parse_json_block(raw)
+        except Exception:  # noqa: BLE001 - never block the run on prose
+            plan = {"parse_error": raw[-2000:], "steps": [], "gates": [],
+                    "deliverables": {}}
+        (workdir / "plan.json").write_text(json.dumps(plan, indent=1))
+        return plan
+
+    @staticmethod
+    def _conformance(plan: dict, result: dict, workdir: Path) -> dict:
+        """Deterministic plan-vs-execution check: planned tools must be
+        called, planned gates must be reported (and pass), promised
+        figures must exist on disk."""
+        planned_tools = {s.get("tool", "") for s in plan.get("steps", [])
+                         if s.get("tool") and s.get("tool") != "fresh_code"}
+        scripts = sorted(workdir.glob("commit_*.py"))
+        code = scripts[-1].read_text() if scripts else ""
+        used = {t for t in planned_tools if re.search(rf"\b{t}\s*\(", code)}
+        missing_tools = sorted(planned_tools - used)
+
+        planned_gates = [g.get("name") for g in plan.get("gates", [])
+                         if g.get("name")]
+        reported = result.get("gates") or {}
+        missing_gates = [g for g in planned_gates if g not in reported]
+        failed_gates = [g for g in planned_gates if g in reported
+                        and isinstance(reported[g], dict)
+                        and reported[g].get("passed") is False]
+
+        files = result.get("files") or {}
+        promised = list((plan.get("deliverables") or {}).get("figures", []))
+        promised += list((plan.get("deliverables") or {}).get(
+            "interactive_3d", []))
+        missing_files = []
+        for lab in promised:
+            f = files.get(lab)
+            if not f or not (Path(f).exists()
+                             or (workdir / str(f)).exists()):
+                missing_files.append(lab)
+        conf = {"planned_tools": sorted(planned_tools),
+                "tools_called": sorted(used),
+                "missing_tools": missing_tools,
+                "planned_gates": planned_gates,
+                "missing_gates": missing_gates,
+                "failed_gates": failed_gates,
+                "promised_files": promised,
+                "missing_files": missing_files,
+                "passed": not (missing_tools or missing_gates
+                               or missing_files)}
+        (workdir / "conformance.json").write_text(json.dumps(conf, indent=1))
+        return conf
+
+    # ------------------------------------------------------------------
     # deterministic gate
     # ------------------------------------------------------------------
     def _gate(self, result: dict, workdir: Path) -> dict:
@@ -332,38 +430,75 @@ class PointCloudAnalysisAgent(BaseAnalysisAgent):
                     "and end with one line:\nSCOUT_JSON: {json evidence}"),
                 "SCOUT_JSON:", workdir, timeout=900)
 
-            result = self._run_phase(
-                "commit",
-                common + (
-                    f"PHASE 2 - PLAN AND EXECUTE.\nScout evidence:\n"
-                    f"{json.dumps(scout, indent=1)}\n\n"
-                    "First, in comments at the top of your script, state your "
-                    "DECISIONS with justification from the evidence: whether "
-                    "to simulate (name the trigger, else skip), beam "
-                    "orientation / ROI respecting the memory budget, and the "
-                    "analyses the objective requires. Then execute them. End "
-                    "with one line:\nRESULT_JSON: {\"decisions\": {...}, "
-                    "\"files\": {label: filename for every artifact - when you "
-                    "simulated an image use EXACTLY the keys \"npy\", "
-                    "\"png\", \"meta\" for its three artifacts}, plus "
-                    "your quantitative result fields}"),
-                "RESULT_JSON:", workdir, timeout=self.commit_timeout)
+            plan = self._plan(common, scout, workdir)
+
+            commit_prompt = common + (
+                f"PHASE 3 - EXECUTE THE PLAN.\nScout evidence:\n"
+                f"{json.dumps(scout, indent=1)}\n\nYOUR PLAN (a binding "
+                f"contract - execute exactly these steps with the named "
+                f"tools; report every planned gate; produce every promised "
+                f"deliverable under its planned label):\n"
+                f"{json.dumps(plan, indent=1)}\n\n"
+                "In comments at the top of your script restate the "
+                "decisions. End with one line:\nRESULT_JSON: {\"decisions\": "
+                "{...}, \"files\": {label: filename for every artifact - "
+                "use the plan's deliverable labels; when you simulated an "
+                "image use EXACTLY the keys \"npy\", \"png\", \"meta\"}, "
+                "\"gates\": {planned gate name: {\"passed\": bool, ...verdict "
+                "fields}}, plus your quantitative result fields}")
+            result = self._run_phase("commit", commit_prompt, "RESULT_JSON:",
+                                     workdir, timeout=self.commit_timeout)
+            conf = self._conformance(plan, result, workdir)
+            if not conf["passed"]:
+                # one narrow re-execution: the contract is the error message
+                result = self._run_phase(
+                    "commit", commit_prompt + (
+                        "\n\nCONFORMANCE FAILURE on your previous attempt - "
+                        "fix ONLY these omissions and return the complete "
+                        f"script:\n{json.dumps(conf, indent=1)}"),
+                    "RESULT_JSON:", workdir, timeout=self.commit_timeout)
+                conf = self._conformance(plan, result, workdir)
 
             gate = self._gate(result, workdir)
+            gate["plan_conformance"] = bool(conf["passed"])
+            gate["planned_gates_all_passed"] = not conf["failed_gates"]
+            gate["conformance"] = conf
+            gate["passed"] = bool(gate.get("passed") and conf["passed"]
+                                  and not conf["failed_gates"])
 
-            decisions = ""
-            commit_file = workdir / "commit_1.py"
-            if commit_file.exists():
-                decisions = "\n".join(
-                    l for l in commit_file.read_text().splitlines()
-                    if l.startswith("#"))[:6000]
+            # plan + conformance become the report's decisions block
+            walk = "\n".join(
+                f"- {m.get('axis')}: {m.get('decision')} "
+                f"(evidence: {m.get('evidence')})"
+                for m in plan.get("method_selection", []))
+            steps = "\n".join(
+                f"- {s.get('tool')}: {s.get('purpose')}"
+                + (f" [fresh code: {s.get('why_fresh')}]"
+                   if s.get('tool') == 'fresh_code' else "")
+                for s in plan.get("steps", []))
+            not_doing = "\n".join(
+                f"- {n.get('method')}: {n.get('reason')}"
+                for n in plan.get("not_doing", []))
+            decisions = (
+                "PLAN (declared before execution)\n"
+                f"Method-selection walk:\n{walk}\n\nSteps:\n{steps}\n\n"
+                f"Not doing:\n{not_doing or '- (none)'}\n\n"
+                f"CONFORMANCE: {'PASSED' if conf['passed'] else 'FAILED'}"
+                f" - tools called {conf['tools_called']}; missing tools "
+                f"{conf['missing_tools']}; missing gates "
+                f"{conf['missing_gates']}; failed gates "
+                f"{conf['failed_gates']}; missing files "
+                f"{conf['missing_files']}")[:8000]
 
             raw = self._llm("interpret", common + (
-                f"PHASE 3 - INTERPRET.\nScout evidence:\n"
-                f"{json.dumps(scout, indent=1)}\n\nExecution results:\n"
-                f"{json.dumps(result, indent=1)}\n\nVerification gate:\n"
-                f"{json.dumps(gate, indent=1)}\n\n" + _INTERPRET_SCHEMA),
-                workdir)
+                f"PHASE 4 - INTERPRET.\nScout evidence:\n"
+                f"{json.dumps(scout, indent=1)}\n\nPlan (the contract):\n"
+                f"{json.dumps(plan, indent=1)}\n\nExecution results:\n"
+                f"{json.dumps(result, indent=1)}\n\nVerification gate "
+                f"(incl. plan conformance - a planned gate that failed or "
+                f"a promised deliverable that is missing MUST be stated, "
+                f"never papered over):\n{json.dumps(gate, indent=1)}\n\n"
+                + _INTERPRET_SCHEMA), workdir)
             interpretation = self._parse_interpretation(raw, workdir)
             (workdir / "interpretation.json").write_text(
                 json.dumps(interpretation, indent=1))

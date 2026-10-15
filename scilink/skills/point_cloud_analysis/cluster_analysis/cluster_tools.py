@@ -708,10 +708,18 @@ def warren_cowley(structure_path: str | None = None,
     return _jsonable(res)
 
 
+# z-SDM detection thresholds: 99.9th percentile of the respective contrast
+# statistic over 2000 Poisson-noise delta-z histograms (200 bins; white and
+# Gaussian-humped backgrounds; zero spike masked) - calibrated 2026-10-14.
+ZSDM_BLIND_CONTRAST = 25.0      # max over the 0.5-6 A band (q99.9 = 21-24)
+ZSDM_EXPECTED_CONTRAST = 13.0   # one pre-specified frequency (q99.9 = 12.6)
+
+
 def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
          dz_max_nm: float = 1.0, r_lateral_nm: float = 0.75,
          bin_nm: float = 0.01, max_centers: int = 20000,
-         out_prefix: str = "zsdm", workdir: str = ".") -> dict:
+         out_prefix: str = "zsdm", workdir: str = ".",
+         expected_spacing_A: float | None = None) -> dict:
     """Per-pair z-SDM (spatial distribution map along the reconstruction
     axis) - the crystallographic-signal GATE.
 
@@ -720,6 +728,21 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
     histogram) mean depth resolution resolves atomic planes; NO oscillation
     means NO site-resolved ordering claim is defensible by any method on
     this data (spec rule 2) - restrict to distance-statistics methods.
+
+    Two detections, either passes the gate:
+      blind    - max contrast (power / median power over 0.5-6 A spacings)
+                 >= ZSDM_BLIND_CONTRAST (25; 99.9th percentile of the same
+                 statistic on 2000 Poisson-noise histograms, white and
+                 humped backgrounds - the old threshold of 8 was ~p=0.3)
+      expected - when ``expected_spacing_A`` is given (crystal structure +
+                 pole known, e.g. FCC <100>: a/2), the contrast at that one
+                 frequency >= ZSDM_EXPECTED_CONTRAST (13; 99.9th pct of a
+                 single bin). Far more sensitive: real CoCrNi <100> {200}
+                 planes read 15-30 here while blind maxima sit at 15-30 too
+                 but below the blind threshold for most pairs.
+    Multi-hit pairs (|dz| < 0.03 nm, both species at one event) form a
+    delta spike at zero that is masked before the FFT and reported as
+    ``center_spike_excess_frac``; the self pair is excluded by distance.
     """
     import matplotlib
     matplotlib.use("Agg")
@@ -749,21 +772,32 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
                 continue
             d = bxyz[np.asarray(nn)] - xyz[ci]
             lat = np.hypot(d[:, 0], d[:, 1])
-            dz = d[(lat <= r_lateral_nm)
-                   & (np.abs(d[:, 2]) <= dz_max_nm), 2]
-            hist += np.histogram(dz, bins=edges)[0]
-    # remove the self pair (delta-z = 0 spike) when A and B overlap
+            adz = np.abs(d[:, 2])
+            # the self pair (A also in B) is excluded by DISTANCE; the old
+            # 'subtract len(centers) from the middle bin' landed one bin
+            # off (float edges) and left a +/- dipole at zero
+            keep = ((lat <= r_lateral_nm) & (adz <= dz_max_nm)
+                    & ~((lat < 1e-9) & (adz < 1e-9)))
+            hist += np.histogram(d[keep, 2], bins=edges)[0]
     mid = len(hist) // 2
-    if set(a_members) & set(b_members):
-        hist[mid] -= len(centers)
-
-    bg = gaussian_filter1d(hist, sigma=max(3, int(0.08 / bin_nm)))
-    signal = hist - bg
+    sigma_bins = max(3, int(0.08 / bin_nm))
+    bg = gaussian_filter1d(hist, sigma=sigma_bins)
+    # multi-hit spike: co-evaporated ions reconstruct to (nearly) the same
+    # depth; a delta at dz=0 is broadband in the FFT and fakes "planes"
+    w = max(1, int(round(0.03 / bin_nm)))
+    spike_excess = float((hist[mid - w:mid + w + 1]
+                          - bg[mid - w:mid + w + 1]).sum())
+    spike_frac = spike_excess / max(float(bg[mid]) * (2 * w + 1), 1.0)
+    hist_m = hist.astype(float).copy()
+    hist_m[mid - w:mid + w + 1] = bg[mid - w:mid + w + 1]
+    bg = gaussian_filter1d(hist_m, sigma=sigma_bins)
+    signal = hist_m - bg
     power = np.abs(np.fft.rfft(signal)) ** 2
     freqs = np.fft.rfftfreq(len(signal), d=bin_nm)
     phys = (freqs > 1 / 0.6) & (freqs < 1 / 0.05)  # plane spacings 0.5-6 A
     peak_contrast = 0.0
     spacing_A = None
+    c_exp = None
     med = float(np.median(power[phys])) if phys.any() else 0.0
     if med > 0:
         contrast = power / med
@@ -773,21 +807,45 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
         # sharp plane comb (full-density data) a HARMONIC can out-power
         # the fundamental, and 10/f of a harmonic halves the spacing
         sig = [i for i in np.where(phys)[0]
-               if 0 < i < len(power) - 1 and contrast[i] >= 8.0
+               if 0 < i < len(power) - 1
+               and contrast[i] >= ZSDM_BLIND_CONTRAST
                and power[i] >= power[i - 1] and power[i] >= power[i + 1]]
         spacing_A = round(10.0 / float(freqs[min(sig) if sig else ip]), 3)
-    has_signal = bool(peak_contrast >= 8.0)
+        if expected_spacing_A:
+            ie = int(np.argmin(np.abs(freqs - 10.0 / expected_spacing_A)))
+            c_exp = float(contrast[max(ie - 1, 0):ie + 2].max())
+    blind = bool(peak_contrast >= ZSDM_BLIND_CONTRAST)
+    expected = bool(c_exp is not None and c_exp >= ZSDM_EXPECTED_CONTRAST)
+    has_signal = blind or expected
+    if has_signal and not blind:
+        spacing_A = float(expected_spacing_A)
     res = {"species_a": a_members, "species_b": b_members,
            "n_centers": int(len(centers)),
            "n_pairs": int(hist.sum()),
            "crystallographic_signal": has_signal,
+           "blind_detected": blind,
            "fft_peak_contrast": round(peak_contrast, 1),
+           "expected_spacing_A": expected_spacing_A,
+           "contrast_at_expected": (round(c_exp, 1) if c_exp is not None
+                                    else None),
+           "expected_detected": expected if expected_spacing_A else None,
+           "detection_thresholds": {"blind": ZSDM_BLIND_CONTRAST,
+                                    "expected": ZSDM_EXPECTED_CONTRAST,
+                                    "calibration": "99.9th pct of Poisson "
+                                                   "noise, 2000 draws"},
+           "center_spike_excess_frac": round(spike_frac, 3),
            "plane_spacing_A": spacing_A if has_signal else None,
            "gate_verdict": (
                "z-SDM resolves lattice planes - site-resolved ordering "
-               "analysis is admissible" if has_signal else
+               "analysis is admissible" + (
+                   " (detected at the expected spacing; blind search "
+                   "below threshold)" if not blind else "")
+               if has_signal else
                "NO lattice-plane signal - site-resolved SRO claims are "
-               "NOT defensible on this data; use distance statistics only")}
+               "NOT defensible on this data; use distance statistics only"
+               + ("" if expected_spacing_A else
+                  " (pass expected_spacing_A when structure and pole are "
+                  "known - the targeted test is ~2x more sensitive)"))}
 
     zc = 0.5 * (edges[:-1] + edges[1:])
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11, 4.2))
@@ -803,10 +861,15 @@ def zsdm(pos_path: str, rrng_path: str, species_a, species_b=None,
                     label=f"{spacing_A} A" + (" (signal)" if has_signal
                                               else " (below threshold)"))
         ax2.legend(fontsize=8)
+    if expected_spacing_A:
+        ax2.axvline(10.0 / expected_spacing_A, color="#999999", ls=":",
+                    label=f"expected {expected_spacing_A} A "
+                          f"(contrast {c_exp:.1f} / {ZSDM_EXPECTED_CONTRAST})")
+        ax2.legend(fontsize=8)
     ax2.set_xlabel("spatial frequency [1/nm]")
-    ax2.set_ylabel("detrended power")
-    ax2.set_title(f"plane signal: contrast {peak_contrast:.1f} "
-                  f"(threshold 8)")
+    ax2.set_ylabel("detrended power (zero spike masked)")
+    ax2.set_title(f"plane signal: blind contrast {peak_contrast:.1f} "
+                  f"(threshold {ZSDM_BLIND_CONTRAST})")
     png = wd / f"{out_prefix}_zsdm.png"
     fig.savefig(png, dpi=200, bbox_inches="tight")
     plt.close(fig)
@@ -1358,13 +1421,24 @@ TOOL_SPECS = [
         import_line=_IMP + "zsdm",
         signature=("zsdm(pos_path, rrng_path, species_a, species_b=None, "
                    "dz_max_nm=1.0, r_lateral_nm=0.75, bin_nm=0.01, "
-                   "out_prefix='zsdm', workdir='.') -> dict"),
+                   "out_prefix='zsdm', workdir='.', "
+                   "expected_spacing_A=None) -> dict"),
         agents=["simulation"],
         when_to_use=("BEFORE any site-resolved SRO/ordering claim on APT "
                      "data (spec rule 2), and to test whether ML-CSRO "
-                     "z-SDM features are even present."),
-        returns=("crystallographic_signal, fft_peak_contrast, "
-                 "plane_spacing_A, gate_verdict, png"),
+                     "z-SDM features are even present. ALWAYS pass "
+                     "expected_spacing_A when the crystal structure and "
+                     "analysis pole are known (FCC <100>: a/2, e.g. 1.78 A "
+                     "for CoCrNi; BCC <100>: a/2; FCC <111>: a/sqrt3) - "
+                     "the targeted test is ~2x more sensitive than the "
+                     "blind band search and real APT planes often sit "
+                     "between them. Run at least one same-species pair."),
+        returns=("crystallographic_signal (blind OR expected detection), "
+                 "blind_detected, fft_peak_contrast (blind max, threshold "
+                 "25), contrast_at_expected (threshold 13), "
+                 "expected_detected, plane_spacing_A, "
+                 "center_spike_excess_frac (multi-hit zero spike, masked), "
+                 "detection_thresholds, gate_verdict, png"),
         example=("g = zsdm('tip.csv', 't.rrng', 'Fe', workdir='out')"),
     ),
     ToolSpec(

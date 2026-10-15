@@ -34,7 +34,14 @@ walk in your plan/decisions:
 2. **Crystallographic-signal gate**: compute per-pair z-SDMs. No lattice-
    plane oscillations => NO site-resolved ordering claim is defensible by
    ANY method - report that ceiling explicitly and restrict to
-   distance-statistics methods.
+   distance-statistics methods. Pass `expected_spacing_A` whenever the
+   structure and analysis pole are known (FCC <100>: a/2): the targeted
+   test is ~2x more sensitive than the blind band search, and real APT
+   plane signals (CoCrNi <100> {200}: contrast 15-30) sit between the two
+   thresholds. Run at least one same-species pair; a cross-pair alone is
+   not a gate. The multi-hit zero spike is masked by the tool - a large
+   `center_spike_excess_frac` on real data is a detector artifact, not
+   planes.
 3. **Question specificity**: open-ended "any SRO/clustering?" -> model-free
    first: k-NN distance distributions + RDF vs label-shuffle null, MSM
    sweep for discrete clusters, CCD for meso-scale partitioning. Named
@@ -103,8 +110,23 @@ walk in your plan/decisions:
   z-SDM admissibility PASSED (contrast 99, a/2 plane spacing);
   ML-CSRO correctly withheld (out of trained domain).
   Run: ~/Downloads/abtem/results/wtav_family1/.
-- Unit regression: tests/test_cluster_tools.py (11 checks - blind
+- Unit regression: tests/test_cluster_tools.py (14 checks - blind
   recovery, cluster-free refusal, WC shuffle control + analytic B2
   alpha = +1, z-SDM gate both verdicts + bcc a/2 spacing).
+- z-SDM gate RECALIBRATED (2026-10-14) after a live false positive
+  (CoCrNi random control, Cr-Ni cross pair: "planes at 2.857 A",
+  contrast 9.4 over the old threshold 8, which is only the ~70th
+  percentile of Poisson noise). Fixes: self pair excluded by distance
+  (the old middle-bin subtraction landed one bin off and left a dipole),
+  multi-hit zero spike masked, thresholds set at the 99.9th percentile
+  of 2000 noise histograms (blind 25, expected-spacing 13). Re-scored:
+  WTaV lattice blind 79 (pass); synthetic APT-degraded 4.9 (fail);
+  published CoCrNi <100> REAL data now PASSES at the expected {200}
+  spacing 1.78 A (Ni-Ni 15.5, Cr-Ni 15.3, Cr-Cr 30.4 blind) - which
+  matches the paper's premise and REVERSES the D2 manual verdict ("no
+  plane signal", contrast 2.9 = the dipole artifact); the authors'
+  random set stays below threshold (4-10). Frequency bins are 0.5/nm
+  at the default window, so recovered spacings near 2 A are quantized
+  (1.82/2.0/2.22 A); the expected-spacing test tolerates +/-1 bin.
 - quality_gate (once nativized): metric = null-model contrast
   (observed/null); physical_review: false.

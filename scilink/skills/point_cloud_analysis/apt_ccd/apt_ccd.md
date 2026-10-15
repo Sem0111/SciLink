@@ -83,10 +83,23 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   benchmark: the AUTHORS' random dataset (same positions, scrambled
   labels, zero chemistry) yielded 4 communities with KS +0.42..+0.52 -
   equal to or LARGER than the real data's. Therefore a CCD community
-  structure is NOT evidence of segregation by itself: ALWAYS rerun
-  detection on a label-shuffle (or provided random) control and claim
-  only structure ABSENT from the control; spatially contiguous domains
-  (vs salt-and-pepper) are the corroborating signature.
+  structure is NOT evidence of segregation by itself: ALWAYS call
+  `ccd_shuffle_control` right after `detect_segregation` and report only
+  the ids it lists in `communities_above_control`; spatially contiguous
+  domains (vs salt-and-pepper) are the corroborating signature.
+- Budget: the default control (per-neighborhood multinomial redraw) runs
+  in seconds because it reuses the observed neighborhoods. The `exact=True`
+  ion-label shuffle rebuilds neighborhoods per seed (5-15 min per seed on
+  ~1.5M ions) - never loop neighborhoods_from_apt by hand for a control.
+  Verified live 2026-10-14 on the CoCrNi random control: observed 4
+  communities / max|KS| 0.56 vs exact-shuffle seeds 3-4 / 0.50-0.59 ->
+  noise partitioning, no claim; the default control reproduced that
+  verdict in 27 s (composition deviation 0.052 vs null 0.044 +/- 0.005).
+- The verdict statistic is the community's mean IONIC COMPOSITION
+  deviation from bulk (`max_dev`), not KS: KS magnitudes are 0.5-0.8 on
+  homogeneous data and do not separate real from null. The tool's
+  `observed.communities[id].mean_fraction` is the per-community ionic
+  composition to report (never the KS numbers as "compositions").
 
 ## validation
 

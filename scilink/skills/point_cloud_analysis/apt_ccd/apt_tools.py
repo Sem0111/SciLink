@@ -189,6 +189,7 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
                              if t not in present
                              and not any(_elems(t) & _elems(l)
                                          for l in ignored_effective)]
+    Path(savedir).mkdir(parents=True, exist_ok=True)  # vendored code won't
     res = detect_compositional_communities(
         neighborhood_csv, savedir=savedir,
         k_values=k_values or [4, 5, 6],
@@ -245,6 +246,270 @@ def detect_segregation(neighborhood_csv: str, savedir: str = "ccd_analysis",
     if ks.exists():
         res["ks_plot_png"] = str(ks)
     return res
+
+
+def _max_abs_ks(seg: dict) -> float:
+    comps = seg.get("community_compositions") or {}
+    vals = [abs(float(v)) for comp in comps.values() for v in comp.values()]
+    return max(vals) if vals else 0.0
+
+
+def _community_contiguity(community_xyz: str, max_points: int = 40000,
+                          seed: int = 0) -> dict | None:
+    """Fraction of a point's 12 nearest neighbours sharing its community
+    label, against the random expectation sum(p_i^2). Extended-xyz input
+    (count line, comment line, then ``label x y z`` whitespace rows)."""
+    try:
+        arr = np.loadtxt(community_xyz, skiprows=2)
+    except Exception:  # noqa: BLE001 - best-effort diagnostic
+        return None
+    if arr.ndim != 2 or arr.shape[1] < 4 or len(arr) < 50:
+        return None
+    from scipy.spatial import cKDTree
+    rng = np.random.default_rng(seed)
+    idx = rng.choice(len(arr), size=min(max_points, len(arr)), replace=False)
+    sub = arr[idx]
+    lab = sub[:, 0].astype(int)
+    xyz = sub[:, 1:4]
+    k = min(13, len(sub))
+    _, ind = cKDTree(xyz).query(xyz, k=k)
+    same = float((lab[ind[:, 1:]] == lab[:, None]).mean())
+    _, cc = np.unique(lab, return_counts=True)
+    p = cc / cc.sum()
+    rand_exp = float((p ** 2).sum())
+    return {"neighbour_same_label_frac": round(same, 4),
+            "random_expectation": round(rand_exp, 4),
+            "excess": round(same - rand_exp, 4)}
+
+
+def _community_centroids(df, labels, community_xyz: str) -> dict:
+    """Per consensus community: assigned-neighborhood count, mean ionic
+    fraction per label, and the largest absolute deviation of that mean
+    from the bulk fraction (fraction units). Rows are joined to the
+    extended-xyz community file on the neighborhood midpoints."""
+    try:
+        arr = np.loadtxt(community_xyz, skiprows=2)
+    except Exception:  # noqa: BLE001
+        return {}
+    if arr.ndim != 2 or arr.shape[1] < 4:
+        return {}
+    key = lambda a: [tuple(np.round(r, 3)) for r in a]  # noqa: E731
+    mids = df[["midpoint_x", "midpoint_y", "midpoint_z"]].to_numpy(float)
+    lookup = {k: i for i, k in enumerate(key(mids))}
+    rows = [lookup.get(k) for k in key(arr[:, 1:4])]
+    ok = np.array([r is not None for r in rows])
+    if ok.sum() < 0.9 * len(arr):  # fall back to row order (write_xyz order)
+        sub = df.loc[df["outer_layer"].astype(str).str.lower() != "true"] \
+            if "outer_layer" in df else df
+        if len(sub) != len(arr):
+            return {}
+        idx = sub.index.to_numpy()
+    else:
+        idx = np.array([r for r in rows if r is not None])
+        arr = arr[ok]
+    comm = arr[:, 0].astype(int)
+    counts = df.loc[idx, labels].to_numpy(float)
+    tot = counts.sum()
+    bulk = counts.sum(axis=0) / max(tot, 1.0)
+    out = {}
+    for cid in np.unique(comm):
+        m = comm == cid
+        c = counts[m].sum(axis=0)
+        frac = c / max(c.sum(), 1.0)
+        dev = frac - bulk
+        j = int(np.argmax(np.abs(dev)))
+        out[str(cid)] = {"n_neighborhoods": int(m.sum()),
+                         "mean_fraction": {l: round(float(f), 4)
+                                           for l, f in zip(labels, frac)},
+                         "max_dev": round(float(abs(dev[j])), 4),
+                         "dev_ion": labels[j],
+                         "dev_sign": "enriched" if dev[j] > 0 else "depleted"}
+    return out
+
+
+def ccd_shuffle_control(neighborhood_csv: str, observed: dict | None = None,
+                        n_shuffles: int = 5, savedir: str = "ccd_control",
+                        exact: bool = False, pos_path: str | None = None,
+                        rrng_path: str | None = None, radius_nm: float = 1.0,
+                        overlap: float = 0.5, k_values: list | None = None,
+                        ignore_ions: list | None = None, seed: int = 0,
+                        n_sigma: float = 2.0) -> dict:
+    """Label-shuffle null for CCD: is the observed community structure
+    distinguishable from what the clusterer carves out of counting noise?
+
+    Default (``exact=False``, seconds): every neighborhood keeps its own
+    ion count and gets its composition redrawn from the bulk multinomial.
+    That is the label-shuffle null for the per-neighborhood composition
+    marginals (hypergeometric ~ multinomial at APT ion counts) and needs
+    no neighborhood rebuild. It does NOT reproduce the spatial
+    autocorrelation that overlapping neighborhoods inherit from shared
+    ions, so compare composition statistics against it, not contiguity.
+    ``exact=True`` shuffles ion labels and reruns ``neighborhoods_from_apt``
+    per seed (needs ``pos_path``/``rrng_path``; a full neighborhood pass
+    per seed - 5-15 min each on ~1.5M ions).
+
+    Statistic: per consensus community, the largest deviation of its mean
+    ionic fraction from the bulk (``max_dev``, fraction units) - KS
+    signatures are NOT used for the verdict because k-means carves
+    composition tails with |KS| 0.5-0.8 on homogeneous data (null and
+    real alike). A community is claimable only if its max_dev exceeds the
+    control's mean + ``n_sigma`` * std of per-run max_dev. Observed
+    structure matching or below the control = noise partitioning.
+    """
+    import pandas as pd
+
+    savedir_p = Path(savedir)
+    savedir_p.mkdir(parents=True, exist_ok=True)
+    csv_p = Path(neighborhood_csv)
+    df = pd.read_csv(csv_p)
+    labels = [c[1:] for c in df.columns if c.startswith("p")
+              and c[1:] in df.columns]
+    if not labels:
+        raise ValueError("neighborhood csv has no p<label> fraction columns")
+    counts = df[labels].to_numpy(dtype=float)
+    n_atoms = counts.sum(axis=1)
+    bulk_p = counts.sum(axis=0) / max(counts.sum(), 1.0)
+    density = df["density"].to_numpy(dtype=float) if "density" in df \
+        else None
+
+    if observed is None:
+        observed = detect_segregation(str(csv_p),
+                                      savedir=str(savedir_p / "observed"),
+                                      k_values=k_values,
+                                      ignore_ions=ignore_ions)
+
+    def _summarize(seg, frame):
+        s = {"community_count": int(seg.get("community_count") or 0),
+             "max_abs_ks": round(_max_abs_ks(seg), 4)}
+        cx = seg.get("community_xyz")
+        if cx and Path(cx).exists():
+            cents = _community_centroids(frame, labels, cx)
+            s["communities"] = cents
+            s["max_dev"] = max((c["max_dev"] for c in cents.values()),
+                               default=0.0)
+            s["contiguity"] = _community_contiguity(cx)
+        else:
+            s["communities"], s["max_dev"] = {}, 0.0
+        return s
+
+    obs = _summarize(observed, df)
+    obs["bulk_fraction"] = {l: round(float(p), 4)
+                            for l, p in zip(labels, bulk_p)}
+
+    control, control_png = [], None
+    for s in range(int(n_shuffles)):
+        rng = np.random.default_rng(seed + s)
+        sdir = savedir_p / f"shuffle_{s}"
+        sdir.mkdir(parents=True, exist_ok=True)
+        if exact:
+            if not (pos_path and rrng_path):
+                raise ValueError("exact=True needs pos_path and rrng_path")
+            tmp = _shuffled_pos_csv(pos_path, sdir / f"shuffle_{s}.csv", rng)
+            nb = neighborhoods_from_apt(str(tmp), rrng_path,
+                                        radius_nm=radius_nm, overlap=overlap,
+                                        savedir=str(sdir))
+            scsv = nb["neighborhood_csv"]
+        else:
+            new = np.vstack([rng.multinomial(int(n), bulk_p) if n > 0
+                             else np.zeros(len(labels), dtype=int)
+                             for n in n_atoms])
+            sdf = df.copy()
+            sdf[labels] = new
+            with np.errstate(divide="ignore", invalid="ignore"):
+                frac = np.where(n_atoms[:, None] > 0,
+                                new / np.maximum(n_atoms[:, None], 1), 0.0)
+            sdf[[f"p{l}" for l in labels]] = frac
+            dcols = [f"d{l}" for l in labels if f"d{l}" in sdf.columns]
+            if dcols and density is not None:
+                sdf[dcols] = frac[:, [labels.index(c[1:]) for c in dcols]] \
+                    * density[:, None]
+            scsv = sdir / f"{csv_p.stem}_shuffle{s}.csv"
+            sdf.to_csv(scsv, index=False)
+        seg = detect_segregation(str(scsv), savedir=str(sdir),
+                                 k_values=k_values, ignore_ions=ignore_ions)
+        sframe = pd.read_csv(scsv) if exact else sdf
+        entry = {"seed": seed + s, **_summarize(seg, sframe)}
+        entry.pop("communities", None)  # per-seed centroids are noise
+        control.append(entry)
+        if control_png is None:
+            control_png = seg.get("community_map_png")
+
+    ctrl_dev = np.array([c["max_dev"] for c in control], dtype=float)
+    ctrl_ks = np.array([c["max_abs_ks"] for c in control], dtype=float)
+    ctrl_nc = [c["community_count"] for c in control]
+    thr = float(ctrl_dev.mean() + n_sigma * ctrl_dev.std()) \
+        if len(ctrl_dev) else float("nan")
+    above = sorted((cid for cid, c in obs["communities"].items()
+                    if c["max_dev"] > thr),
+                   key=lambda cid: -obs["communities"][cid]["max_dev"])
+    passed = bool(above)
+    if passed:
+        desc = "; ".join(
+            f"id {cid}: {obs['communities'][cid]['dev_ion']} "
+            f"{obs['communities'][cid]['dev_sign']} "
+            f"({obs['communities'][cid]['mean_fraction'][obs['communities'][cid]['dev_ion']]:.3f}"
+            f" vs bulk {obs['bulk_fraction'][obs['communities'][cid]['dev_ion']]:.3f})"
+            for cid in above)
+        verdict = (f"{len(above)} of {obs['community_count']} observed "
+                   f"communities exceed the label-shuffle control "
+                   f"(threshold max_dev > {thr:.3f} = control mean + "
+                   f"{n_sigma:g} sd): {desc}. Only these may be reported "
+                   "as segregation, and only with a spatially contiguous "
+                   "domain")
+    else:
+        verdict = (f"observed community structure ({obs['community_count']} "
+                   f"communities, max composition deviation "
+                   f"{obs['max_dev']:.3f}, max |KS| {obs['max_abs_ks']:.3f}) "
+                   f"does not exceed the label-shuffle control "
+                   f"({min(ctrl_nc)}-{max(ctrl_nc)} communities, max_dev "
+                   f"{ctrl_dev.mean():.3f} +/- {ctrl_dev.std():.3f}, max |KS| "
+                   f"{ctrl_ks.mean():.3f}): noise partitioning of counting "
+                   "statistics, NOT segregation")
+    out = {"passed": passed, "verdict": verdict,
+           "statistic": ("max_dev = largest |mean ionic fraction of the "
+                         "community - bulk fraction|; KS reported for "
+                         "reference only"),
+           "observed": obs, "control": control,
+           "control_summary": {"community_count_range": [min(ctrl_nc),
+                                                         max(ctrl_nc)],
+                               "max_dev_mean": round(float(ctrl_dev.mean()),
+                                                     4),
+                               "max_dev_std": round(float(ctrl_dev.std()), 4),
+                               "dev_threshold": round(thr, 4),
+                               "max_abs_ks_mean": round(float(ctrl_ks.mean()),
+                                                        4)},
+           "communities_above_control": above,
+           "null_model": ("exact ion label shuffle + neighborhood rebuild"
+                          if exact else
+                          "per-neighborhood multinomial redraw from bulk "
+                          "(label-shuffle null for composition marginals; "
+                          "no overlap autocorrelation - do not compare "
+                          "contiguity against it)"),
+           "n_shuffles": int(n_shuffles),
+           "shuffle_control_png": control_png,
+           "savedir": str(savedir_p)}
+    (savedir_p / "ccd_shuffle_control.json").write_text(
+        json.dumps(_jsonable(out), indent=1))
+    return _jsonable(out)
+
+
+def _shuffled_pos_csv(pos_path, out_csv, rng):
+    """Write a copy of a headerless x,y,z,Da csv (or ranged pos) with the
+    Da column permuted - the exact ion-label shuffle."""
+    p = Path(pos_path)
+    suf = p.suffix.lower()
+    if suf == ".pos":  # native big-endian float32 records (apav+numpy-2 broken)
+        arr = np.fromfile(str(p), dtype=">f4").reshape(-1, 4)
+    elif suf in (".apt", ".epos"):
+        import apav
+        roi = apav.load_apt(str(p)) if suf == ".apt" else apav.load_epos(str(p))
+        arr = np.column_stack([roi.xyz, roi.mass])
+    else:  # headerless x,y,z,Da csv
+        arr = np.loadtxt(p, delimiter=",")
+    arr = np.asarray(arr, dtype=float)
+    arr[:, 3] = rng.permutation(arr[:, 3])
+    np.savetxt(out_csv, arr, delimiter=",", fmt="%.4f")
+    return out_csv
 
 
 def visualize_communities(community_xyz: str, out_prefix: str,
@@ -818,8 +1083,55 @@ TOOL_SPECS = [
                  "community_compositions_by_element (same, keyed by bare "
                  "element symbol - USE THIS for element lookups), "
                  "empty_partition_note, community_map_png, community_xyz; "
-                 "communities are NOT segregation evidence without a "
-                 "label-shuffle control"),
+                 "communities are NOT segregation evidence until "
+                 "ccd_shuffle_control passes - call it next, always"),
         example="seg = detect_segregation(nb['neighborhood_csv'])",
+    ),
+    ToolSpec(
+        name="ccd_shuffle_control",
+        description=("Label-shuffle null for CCD: reruns community detection "
+                     "on composition-scrambled copies of the SAME "
+                     "neighborhoods and tests whether the observed "
+                     "community count / KS magnitudes exceed what the "
+                     "clusterer carves from counting noise. Mandatory "
+                     "companion of detect_segregation on every dataset."),
+        parameters={"neighborhood_csv": {"type": "string",
+                                         "description": "the OBSERVED csv "
+                                                        "from neighborhoods_*"},
+                    "observed": {"type": "object",
+                                 "description": "the detect_segregation "
+                                                "result for that csv (avoids "
+                                                "recomputing it)"},
+                    "n_shuffles": {"type": "integer",
+                                   "description": "control seeds (default 5)"}},
+        required=["neighborhood_csv"],
+        import_line=_IMP + "ccd_shuffle_control",
+        signature=("ccd_shuffle_control(neighborhood_csv, observed=None, "
+                   "n_shuffles=5, savedir='ccd_control', exact=False, "
+                   "pos_path=None, rrng_path=None, k_values=None, "
+                   "ignore_ions=None, seed=0, n_sigma=2.0) -> dict"),
+        agents=["simulation"],
+        when_to_use=("IMMEDIATELY after detect_segregation, before any "
+                     "community is reported. Default exact=False redraws "
+                     "each neighborhood's composition from the bulk "
+                     "multinomial (seconds; no neighborhood rebuild) - the "
+                     "label-shuffle null for the composition marginals. "
+                     "exact=True permutes ion labels and rebuilds "
+                     "neighborhoods per seed (needs pos_path+rrng_path; "
+                     "5-15 min PER SEED on ~1.5M ions - budget for it or "
+                     "use n_shuffles<=3). Never hand-roll this loop."),
+        returns=("passed (any observed community beats the control), "
+                 "verdict text, observed {community_count, max_dev, "
+                 "bulk_fraction, communities {id: {n_neighborhoods, "
+                 "mean_fraction per ion = the community's IONIC "
+                 "composition, max_dev, dev_ion, dev_sign}}, contiguity, "
+                 "max_abs_ks}, control [per seed], control_summary "
+                 "{dev_threshold = control mean + n_sigma*sd}, "
+                 "communities_above_control (the ONLY ids you may report "
+                 "as segregation), statistic, null_model, "
+                 "shuffle_control_png. Verdict uses composition deviation, "
+                 "not KS: KS is 0.5-0.8 on homogeneous data too."),
+        example=("ctl = ccd_shuffle_control(nb['neighborhood_csv'], "
+                 "observed=seg, savedir='ccd_control')"),
     ),
 ]

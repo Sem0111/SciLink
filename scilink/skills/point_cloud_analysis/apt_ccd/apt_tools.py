@@ -749,8 +749,13 @@ def visualize_apt_elements(pos_path: str, rrng_path: str, out_prefix: str,
     fig.savefig(png, dpi=200, bbox_inches="tight")
     plt.close(fig)
 
+    ion_counts = {sp: int(counts[sp]) for sp in species}
     out = {"png": str(png),
-           "ion_species": {sp: counts[sp] for sp in species},
+           "ion_species": ion_counts,
+           # alias so composition_from_labels(viz['ion_type_counts']) works
+           # exactly like the neighborhoods_* return (agents guessed
+           # 'element_counts'/'counts' twice live and reported {}).
+           "ion_type_counts": ion_counts,
            "n_points_shown": int(len(xyz))}
     try:
         import plotly.graph_objects as go
@@ -955,9 +960,12 @@ TOOL_SPECS = [
         agents=["simulation"],
         when_to_use=("FIRST figure of any APT analysis - render it before "
                      "the CCD map; label it hero_png in your files dict."),
-        returns="png (hero), html (interactive 3D), per-element counts",
+        returns=("png (hero), html (interactive 3D), ion_type_counts "
+                 "{ion label: count} (alias ion_species) - pass it to "
+                 "composition_from_labels for the bulk ionic composition"),
         example=("viz = visualize_apt_elements('R31.apt', 'ranges.rrng', "
-                 "'tip', workdir='out')"),
+                 "'tip', workdir='out'); "
+                 "comp = composition_from_labels(viz['ion_type_counts'])"),
     ),
     ToolSpec(
         name="visualize_communities",
@@ -1002,9 +1010,11 @@ TOOL_SPECS = [
                      "decompose=True adds an elemental estimate only when "
                      "the user explicitly requests decomposition."),
         parameters={"label_counts": {"type": "object",
-                                     "description": "e.g. ion_type_counts "
-                                                    "from a neighborhoods_* "
-                                                    "call"}},
+                                     "description": "the ion_type_counts "
+                                                    "dict returned by "
+                                                    "visualize_apt_elements "
+                                                    "or any neighborhoods_* "
+                                                    "call (no other key)"}},
         required=["label_counts"],
         import_line=_IMP + "composition_from_labels",
         signature="composition_from_labels(label_counts, decompose=False) -> dict",
@@ -1014,7 +1024,9 @@ TOOL_SPECS = [
                      "explicit user request."),
         returns=("ionic_composition_at_pct (+ elemental_estimate_at_pct "
                  "when decompose=True)"),
-        example="comp = composition_from_labels(nb['ion_type_counts'])",
+        example=("comp = composition_from_labels(viz['ion_type_counts'])  "
+                 "# viz from visualize_apt_elements; nb['ion_type_counts'] "
+                 "works too"),
     ),
     ToolSpec(
         name="neighborhoods_from_structure",

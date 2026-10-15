@@ -60,9 +60,16 @@ Tools: `neighborhoods_from_apt` (real data), `neighborhoods_from_structure`
   into elements unless the user explicitly asks (decompose=True);
   decomposition injects assumptions and is not the APT reporting standard
   here. Never hand-roll element tallies from labels.
-- Probing scale: 1 nm neighborhoods miss sub-nm segregation; if a targeted
-  species shows no community at 1 nm, rerun at 0.5-0.75 nm before calling
-  a negative.
+- Probing scale: 1 nm neighborhoods miss sub-nm segregation; if a TARGETED
+  species (named in the objective, or a rare group map_species_zone
+  localized) shows no community at 1 nm, rerun at 0.5-0.75 nm before
+  calling a negative. Do NOT re-probe finer on an open-ended screen whose
+  1 nm `ccd_shuffle_control` already reads noise partitioning, and never
+  on a "borderline" deviation (a null-model statistic within 20%% of its
+  own threshold is the null, not a hint): sub-nm chemical order is the
+  z-SDM / ML-CSRO regime, and a finer CCD pass cannot rescue it. Cost
+  scales ~(1 nm / r)^3: a 0.6 nm pass on 1.5M ions took 51 min live
+  (2026-10-14) against 5 min at 1 nm, and returned the same null.
 
 ### rare-species blindness (hard-won rule)
 - CCD composition clustering CANNOT detect minority chemistries whose
